@@ -82,7 +82,7 @@ def create_server(
     engine: SecureDuckDBEngine | None = None,
     rbac_middleware: RBACMiddleware | None = None,
     strict_auth: bool | None = None,
-    debug: bool = False,
+    debug: bool = True,
 ) -> MCPServer:
     """Create and configure a production-ready mcp-use MCPServer instance.
 
@@ -413,4 +413,4 @@ def create_server(
 
 
 # Default exported server instance for Dockpack / ASGI runners
-server: MCPServer = create_server()
+server: MCPServer = create_server(debug=True)

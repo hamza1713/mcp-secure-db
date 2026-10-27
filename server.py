@@ -2,9 +2,25 @@
 
 from __future__ import annotations
 
-import logging
 import os
 import sys
+
+# Windows console UTF-8 fix for Rich / mcp-use unicode startup characters (e.g. \u2713 checkmark)
+if sys.platform == "win32":
+    os.environ["PYTHONIOENCODING"] = "utf-8"
+    os.environ["PYTHONUTF8"] = "1"
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    if hasattr(sys.stderr, "reconfigure"):
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
+# Point mcp-use inspector to pinned working CDN version with web bundle
+os.environ.setdefault(
+    "INSPECTOR_CDN_BASE_URL",
+    "https://unpkg.com/@mcp-use/inspector@1.0.0/dist/web",
+)
+
+import logging
 
 from mcp_secure_db.server import create_server, server
 
@@ -34,10 +50,13 @@ def main() -> None:
     logger.info("🔑 Demo Tokens:   token-viewer-demo, token-analyst-demo, token-admin-demo")
     logger.info("=" * 65)
 
+    debug_flag = os.environ.get("DEBUG", "1").lower() in ("1", "true", "yes")
+
     server.run(
         transport=transport,  # type: ignore[arg-type]
         host=host,
         port=port,
+        debug=debug_flag,
     )
 
 
