@@ -13,6 +13,7 @@ from mcp_secure_db.security.rbac import (
     get_current_principal,
     resolve_principal_from_token,
     set_current_principal,
+    warn_if_default_tokens_in_use,
 )
 from mcp_secure_db.security.validator import (
     SQLSecurityError,
@@ -35,4 +36,5 @@ __all__ = [
     "get_current_principal",
     "resolve_principal_from_token",
     "set_current_principal",
+    "warn_if_default_tokens_in_use",
 ]

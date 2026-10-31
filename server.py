@@ -22,6 +22,7 @@ os.environ.setdefault(
 
 import logging
 
+from mcp_secure_db.security.rbac import warn_if_default_tokens_in_use
 from mcp_secure_db.server import create_server, server
 
 logging.basicConfig(
@@ -47,8 +48,10 @@ def main() -> None:
     logger.info(f"🔍 MCP Inspector: http://{browser_host}:{port}/inspector")
     logger.info(f"📚 API Docs:      http://{browser_host}:{port}/docs")
     logger.info(f"🔌 MCP Endpoint:  http://{browser_host}:{port}/mcp")
-    logger.info("🔑 Demo Tokens:   token-viewer-demo, token-analyst-demo, token-admin-demo")
+    logger.info("🔑 Demo Tokens (DEV ONLY): token-viewer-demo, token-analyst-demo, token-admin-demo")
     logger.info("=" * 65)
+
+    warn_if_default_tokens_in_use()
 
     debug_flag = os.environ.get("DEBUG", "1").lower() in ("1", "true", "yes")
 

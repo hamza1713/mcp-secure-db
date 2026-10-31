@@ -321,6 +321,13 @@ class SQLValidator:
                         "is forbidden to prevent compute exhaustion (DoS). Join predicates must reference columns.",
                         "CARTESIAN_JOIN_DOS",
                     )
+                for eq in on_clause.find_all(exp.EQ, exp.GTE, exp.LTE):
+                    if eq.left == eq.right:
+                        raise SQLSecurityError(
+                            "Degenerate Cartesian JOIN with self-comparison tautology (e.g. 'ON x=x') "
+                            "is forbidden to prevent compute exhaustion (DoS). Join conditions cannot compare identical columns.",
+                            "CARTESIAN_JOIN_DOS",
+                        )
 
     def _check_rbac_table_and_column_policy(
         self,
@@ -414,11 +421,20 @@ class SQLValidator:
         ast: exp.Expression,
         target_limit: int,
     ) -> tuple[exp.Expression, int]:
-        """Inject or clamp the root query LIMIT so it never exceeds self.max_rows."""
+        """Inject or clamp query LIMIT so it never exceeds self.max_rows (root and subqueries)."""
+        for lim in ast.find_all(exp.Limit):
+            if lim.expression is not None:
+                try:
+                    val = int(str(lim.expression.this))
+                    if val > self.max_rows:
+                        lim.set("expression", exp.Literal.number(self.max_rows))
+                except (ValueError, TypeError):
+                    pass
+
         existing_limit_node = ast.args.get("limit")
         if isinstance(existing_limit_node, exp.Limit) and existing_limit_node.expression is not None:
             try:
-                current_val = int(existing_limit_node.expression.name)
+                current_val = int(str(existing_limit_node.expression.this))
                 clamped_val = max(1, min(current_val, self.max_rows))
                 ast = ast.limit(clamped_val, copy=True)
                 return ast, clamped_val

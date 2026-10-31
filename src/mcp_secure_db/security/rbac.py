@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from collections.abc import Callable
 from contextvars import ContextVar
@@ -142,6 +143,33 @@ def get_current_principal() -> CallerPrincipal:
 def set_current_principal(principal: CallerPrincipal) -> None:
     """Bind the caller principal for the current request context."""
     _current_principal.set(principal)
+
+
+logger = logging.getLogger("mcp_secure_db.security.rbac")
+
+
+def warn_if_default_tokens_in_use() -> list[str]:
+    """Check if any hardcoded demo authentication tokens are in use, and log a warning if so."""
+    viewer_token = os.environ.get("MCP_VIEWER_TOKEN", "token-viewer-demo")
+    analyst_token = os.environ.get("MCP_ANALYST_TOKEN", "token-analyst-demo")
+    admin_token = os.environ.get("MCP_ADMIN_TOKEN", "token-admin-demo")
+
+    active_defaults = []
+    if viewer_token == "token-viewer-demo":
+        active_defaults.append("token-viewer-demo (MCP_VIEWER_TOKEN)")
+    if analyst_token == "token-analyst-demo":
+        active_defaults.append("token-analyst-demo (MCP_ANALYST_TOKEN)")
+    if admin_token == "token-admin-demo":
+        active_defaults.append("token-admin-demo (MCP_ADMIN_TOKEN)")
+
+    if active_defaults:
+        logger.warning(
+            "SECURITY WARNING: Default demo authentication tokens are active (%s). "
+            "These hardcoded demo tokens are for testing only and must never be used in production. "
+            "Set MCP_VIEWER_TOKEN, MCP_ANALYST_TOKEN, and MCP_ADMIN_TOKEN environment variables to override.",
+            ", ".join(active_defaults),
+        )
+    return active_defaults
 
 
 def _build_token_registry() -> dict[str, CallerPrincipal]:

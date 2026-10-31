@@ -1,7 +1,7 @@
 [project]
 name = "mcp-secure-db"
 version = "1.0.0"
-description = "Enterprise-grade, 4-layer sandboxed analytical database MCP server built natively on mcp-use for Manufact Cloud"
+description = "Reference implementation of a 4-layer sandboxed analytical database MCP server built on mcp-use for Manufact Cloud"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }

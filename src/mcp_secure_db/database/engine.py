@@ -27,7 +27,7 @@ class QueryTimeoutError(TimeoutError):
 
 
 class AuditEntry(BaseModel):
-    """Immutable security & telemetry record for every tool or SQL invocation."""
+    """Security & telemetry record for every tool or SQL invocation."""
 
     event_id: str = Field(default_factory=lambda: f"evt_{uuid.uuid4().hex[:10]}")
     timestamp: str = Field(default_factory=lambda: datetime.now(UTC).isoformat())
@@ -439,7 +439,7 @@ class SecureDuckDBEngine:
         limit_enforced: int,
         timeout_seconds: float,
     ) -> QueryExecutionResult:
-        """Execute a validated SQL query with a hardware-level DuckDB interrupt timer."""
+        """Execute a validated SQL query with a DuckDB conn.interrupt() watchdog timer."""
         timed_out = threading.Event()
 
         def _trigger_interrupt() -> None:

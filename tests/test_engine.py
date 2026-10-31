@@ -35,11 +35,30 @@ def test_tables_seeded_with_expected_counts(engine: SecureDuckDBEngine) -> None:
 
 
 def test_duckdb_configuration_locked(engine: SecureDuckDBEngine) -> None:
-    # Attempting to change memory_limit or enable_external_access must fail
-    with pytest.raises(Exception):
+    # Attempting to change locked DuckDB configuration via SET or PRAGMA must fail
+    with pytest.raises(Exception, match="the configuration has been locked"):
         engine._conn.execute("SET memory_limit = '10GB';")
-    with pytest.raises(Exception):
+    with pytest.raises(Exception, match="the configuration has been locked"):
         engine._conn.execute("SET enable_external_access = true;")
+    with pytest.raises(Exception, match="the configuration has been locked"):
+        engine._conn.execute("SET threads = 8;")
+    with pytest.raises(Exception, match="the configuration has been locked"):
+        engine._conn.execute("SET lock_configuration = false;")
+
+
+def test_engine_blocks_file_readers_directly_without_ast(engine: SecureDuckDBEngine) -> None:
+    # Direct execution on DuckDB connection without AST validator
+    # C++ setting enable_external_access=false must block file and directory reads
+    import duckdb
+
+    with pytest.raises(duckdb.PermissionException, match="file system operations are disabled"):
+        engine._conn.execute("SELECT * FROM read_csv_auto('/etc/passwd')")
+
+    with pytest.raises(duckdb.PermissionException, match="file system operations are disabled"):
+        engine._conn.execute("SELECT * FROM read_parquet('data.parquet')")
+
+    with pytest.raises(duckdb.PermissionException, match="file system operations are disabled"):
+        engine._conn.execute("SELECT * FROM glob('*')")
 
 
 # -----------------------------------------------------------------------------

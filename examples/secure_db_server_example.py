@@ -167,29 +167,56 @@ def set_current_principal(p: CallerPrincipal) -> None:
     _current_principal.set(p)
 
 
-TOKEN_REGISTRY = {
-    "token-viewer-demo": CallerPrincipal(
-        subject="usr_viewer_01",
-        email="viewer@demo.com",
-        role=Role.PUBLIC_VIEWER,
-        scopes=["schema:read"],
-        authenticated_via="bearer_token",
-    ),
-    "token-analyst-demo": CallerPrincipal(
-        subject="usr_analyst_01",
-        email="analyst@demo.com",
-        role=Role.ANALYST,
-        scopes=["schema:read", "sql:execute_bounded"],
-        authenticated_via="bearer_token",
-    ),
-    "token-admin-demo": CallerPrincipal(
-        subject="usr_admin_01",
-        email="admin@demo.com",
-        role=Role.ADMIN,
-        scopes=["schema:read", "sql:execute_bounded", "pii:read", "audit:read"],
-        authenticated_via="bearer_token",
-    ),
-}
+def _get_token_registry() -> dict[str, CallerPrincipal]:
+    viewer_token = os.environ.get("MCP_VIEWER_TOKEN", "token-viewer-demo")
+    analyst_token = os.environ.get("MCP_ANALYST_TOKEN", "token-analyst-demo")
+    admin_token = os.environ.get("MCP_ADMIN_TOKEN", "token-admin-demo")
+
+    return {
+        viewer_token: CallerPrincipal(
+            subject="usr_viewer_01",
+            email="viewer@demo.com",
+            role=Role.PUBLIC_VIEWER,
+            scopes=["schema:read"],
+            authenticated_via="bearer_token",
+        ),
+        analyst_token: CallerPrincipal(
+            subject="usr_analyst_01",
+            email="analyst@demo.com",
+            role=Role.ANALYST,
+            scopes=["schema:read", "sql:execute_bounded"],
+            authenticated_via="bearer_token",
+        ),
+        admin_token: CallerPrincipal(
+            subject="usr_admin_01",
+            email="admin@demo.com",
+            role=Role.ADMIN,
+            scopes=["schema:read", "sql:execute_bounded", "pii:read", "audit:read"],
+            authenticated_via="bearer_token",
+        ),
+    }
+
+
+def warn_if_default_tokens_in_use() -> list[str]:
+    viewer_token = os.environ.get("MCP_VIEWER_TOKEN", "token-viewer-demo")
+    analyst_token = os.environ.get("MCP_ANALYST_TOKEN", "token-analyst-demo")
+    admin_token = os.environ.get("MCP_ADMIN_TOKEN", "token-admin-demo")
+
+    active_defaults = []
+    if viewer_token == "token-viewer-demo":
+        active_defaults.append("token-viewer-demo (MCP_VIEWER_TOKEN)")
+    if analyst_token == "token-analyst-demo":
+        active_defaults.append("token-analyst-demo (MCP_ANALYST_TOKEN)")
+    if admin_token == "token-admin-demo":
+        active_defaults.append("token-admin-demo (MCP_ADMIN_TOKEN)")
+
+    if active_defaults:
+        print(
+            f"SECURITY WARNING: Default demo authentication tokens are active ({', '.join(active_defaults)}). "
+            "These hardcoded demo tokens are for testing only and must never be used in production. "
+            "Override with MCP_VIEWER_TOKEN, MCP_ANALYST_TOKEN, and MCP_ADMIN_TOKEN."
+        )
+    return active_defaults
 
 
 def resolve_token(raw: str | None) -> CallerPrincipal | None:
@@ -198,7 +225,7 @@ def resolve_token(raw: str | None) -> CallerPrincipal | None:
     token = raw.strip()
     if token.lower().startswith("bearer "):
         token = token[7:].strip()
-    return TOKEN_REGISTRY.get(token)
+    return _get_token_registry().get(token)
 
 
 class ExampleBearerAuthProvider(BearerAuthProvider):
@@ -483,8 +510,12 @@ class SQLValidator:
             has_using = bool(join.args.get("using"))
             if join_kind == "CROSS" or (not on_clause and not has_using):
                 raise SQLSecurityError("Unconstrained CROSS JOIN or Cartesian comma-join is forbidden.", "CARTESIAN_JOIN_DOS")
-            if on_clause and not list(on_clause.find_all(exp.Column)):
-                raise SQLSecurityError("Degenerate Cartesian JOIN with literal tautology (e.g. ON 1=1) is forbidden.", "CARTESIAN_JOIN_DOS")
+            if on_clause:
+                if not list(on_clause.find_all(exp.Column)):
+                    raise SQLSecurityError("Degenerate Cartesian JOIN with literal tautology (e.g. ON 1=1) is forbidden.", "CARTESIAN_JOIN_DOS")
+                for eq in on_clause.find_all(exp.EQ, exp.GTE, exp.LTE):
+                    if eq.left == eq.right:
+                        raise SQLSecurityError("Degenerate Cartesian JOIN with self-comparison tautology (e.g. ON x=x) is forbidden.", "CARTESIAN_JOIN_DOS")
 
         # Table & Column RBAC checks
         cte_aliases = {cte.alias_or_name.lower() for cte in ast.find_all(exp.CTE) if cte.alias_or_name}
@@ -507,6 +538,15 @@ class SQLValidator:
                     for t in tables:
                         if PII_COLUMNS_BY_TABLE.get(t):
                             raise SQLSecurityError(f"SELECT * blocked on PII table '{t}' for analyst.", "RBAC_WILDCARD_PII")
+
+        for lim_node in ast.find_all(exp.Limit):
+            if lim_node.expression is not None:
+                try:
+                    val = int(str(lim_node.expression.this))
+                    if val > 1000:
+                        lim_node.set("expression", exp.Literal.number(1000))
+                except (ValueError, TypeError):
+                    pass
 
         clamped = max(1, min(limit, 1000))
         ast = ast.limit(clamped, copy=True)
@@ -863,9 +903,9 @@ def resource_security_rules() -> str:
     return (
         "# 4-Layer Defense-in-Depth Policy\n"
         "1. Layer 1: RBAC Middleware with BearerAuth token resolution.\n"
-        "2. Layer 2: sqlglot AST Validator (blocking DDL, SSRF, DoS joins, PII).\n"
-        "3. Layer 3: DuckDB C++ memory limits & interrupt watchdog.\n"
-        "4. Layer 4: Structured telemetry & immutable audit ring buffer.\n"
+        "2. Layer 2: sqlglot AST Validator (defense in depth; blocks DDL, SSRF, DoS joins, PII).\n"
+        "3. Layer 3: Sandboxed DuckDB Engine (primary defense; memory limits & conn.interrupt() watchdog).\n"
+        "4. Layer 4: Structured telemetry & in-memory audit ring buffer (lost on restart).\n"
     )
 
 
@@ -889,6 +929,7 @@ if __name__ == "__main__":
     port = int(os.environ.get("PORT", "8000"))
     print("=" * 60)
     print("Starting Self-Contained MCP Secure DB Server Example")
-    print("Demo Tokens: token-viewer-demo, token-analyst-demo, token-admin-demo")
+    print("Demo Tokens (DEV ONLY): token-viewer-demo, token-analyst-demo, token-admin-demo")
     print("=" * 60)
+    warn_if_default_tokens_in_use()
     server.run(transport="streamable-http", host=host, port=port)

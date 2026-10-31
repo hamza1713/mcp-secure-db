@@ -25,6 +25,7 @@ from mcp_secure_db.security.rbac import (
     Role,
     SecureDBBearerAuthProvider,
     get_current_principal,
+    warn_if_default_tokens_in_use,
 )
 from mcp_secure_db.security.validator import SQLSecurityError, SQLValidationResult
 
@@ -121,15 +122,17 @@ def create_server(
     strict_auth: bool | None = None,
     debug: bool = True,
 ) -> MCPServer:
-    """Create and configure a production-ready mcp-use MCPServer instance.
+    """Create and configure a production-oriented mcp-use MCPServer instance.
 
     Features:
     - Layer 1: RBAC Middleware with BearerAuth fallback to public_viewer
     - Layer 2: Deterministic AST sqlglot validator (zero LLM token overhead)
-    - Layer 3: Interruptible in-memory DuckDB sandbox with C++ hardware limits
-    - Layer 4: Structured output telemetry & immutable audit ring buffer
+    - Layer 3: In-memory DuckDB sandbox with memory/thread limits and conn.interrupt() watchdog
+    - Layer 4: Structured output telemetry & in-memory audit ring buffer (lost on restart)
     - Full MCP primitives: Tools, Resources (schema:// and policy://), and Prompts
     """
+    warn_if_default_tokens_in_use()
+
     if engine is None:
         engine = SecureDuckDBEngine()
 
@@ -146,9 +149,9 @@ def create_server(
         name="mcp-secure-db",
         version=__version__,
         instructions=(
-            "mcp-secure-db: Enterprise-grade, 4-layer sandboxed analytical database MCP server. "
-            "Enforces strict zero-token AST validation, DuckDB C++ memory limits, table/PII column RBAC, "
-            "and streaming audit provenance for Manufact Cloud."
+            "mcp-secure-db: Reference implementation of a 4-layer sandboxed analytical database MCP server. "
+            "Enforces zero-token AST validation, DuckDB memory limits, table/PII column RBAC, "
+            "and in-memory audit provenance for Manufact Cloud."
         ),
         middleware=[rbac_middleware],
         auth=SecureDBBearerAuthProvider(),
@@ -381,20 +384,22 @@ def create_server(
             "# MCP Secure DB Defense-in-Depth Policy\n\n"
             "## Layer 1: RBAC Middleware & Token Resolution\n"
             "- Roles: `public_viewer`, `analyst`, `admin`\n"
-            "- Tokens: `token-viewer-demo`, `token-analyst-demo`, `token-admin-demo`\n"
+            "- Demo tokens: `token-viewer-demo`, `token-analyst-demo`, `token-admin-demo` (demo only, override via env vars).\n"
             "- Unauthorized tools are dynamically hidden in `tools/list` and hard-blocked in `tools/call`.\n\n"
             "## Layer 2: Deterministic AST Validator (sqlglot)\n"
+            "- Defense-in-depth static firewall (early rejection, RBAC & PII enforcement; does not replace engine sandbox).\n"
             "- Mutating operations blocked: DROP, DELETE, UPDATE, INSERT, CREATE, ALTER, PRAGMA, COPY, ATTACH.\n"
             "- Comment smuggling blocked: `--` and `/* */` patterns rejected.\n"
             "- Multi-statement smuggling blocked: Internal semicolons rejected.\n"
             "- SSRF & file functions blocked: `read_csv`, `read_parquet`, `parquet_scan`, `glob`, `st_read`, etc.\n"
-            "- DoS protection: Unconstrained CROSS JOINs blocked; LIMIT clamped to 1000 max.\n\n"
-            "## Layer 3: Interruptible In-Memory DuckDB Kernel Sandbox\n"
-            "- C++ flags: `memory_limit = 512MB`, `threads = 2`, `enable_external_access = false`.\n"
+            "- DoS mitigation: Mitigates unbounded-join DoS via static checks, enforced by memory, thread, and timeout limits.\n"
+            "- Governance: Blocks admin-only tables & PII columns; clamps LIMIT to 1000 max.\n\n"
+            "## Layer 3: Sandboxed DuckDB Engine (Primary Defense Wall)\n"
+            "- Engine limits: `memory_limit = 512MB`, `threads = 2`, `enable_external_access = false`.\n"
             "- Kernel configuration locked: `SET lock_configuration = true`.\n"
-            "- Active watchdog: 10-second hard execution deadline with `conn.interrupt()` abort.\n\n"
+            "- Query timeout via `conn.interrupt()` watchdog at 10-second deadline.\n\n"
             "## Layer 4: Structured Output Telemetry & Audit Ring Buffer\n"
-            "- Every query and security violation is recorded in a thread-safe ring buffer.\n"
+            "- In-memory audit log (lost on restart; production use needs persistent, append-only storage).\n"
             "- Full execution provenance returned in every JSON payload.\n"
         )
 
@@ -443,7 +448,7 @@ def create_server(
             "1. First execute `verify_query_safety` with the payload to inspect the Layer 2 AST validator diagnostics.\n"
             "2. If you are an analyst or admin, attempt to run the payload through `execute_analytical_sql`.\n"
             "3. Verify that the query is rejected deterministically with zero token leakage.\n"
-            "4. As an admin, invoke `get_security_audit_log` to confirm that the violation was immutably recorded."
+            "4. As an admin, invoke `get_security_audit_log` to confirm that the violation was recorded in the audit log."
         )
 
     # Wrap handlers so middleware processing is active for direct requests and server runners
