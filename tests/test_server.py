@@ -193,3 +193,94 @@ async def test_prompt_red_team_security_audit(mcp_server) -> None:
     prompt_text = prompt.messages[0].content.text
     assert "Adversarial Security Red-Team Engineer" in prompt_text
     assert "read_csv_auto('/etc/passwd')" in prompt_text
+
+
+# -----------------------------------------------------------------------------
+# Middleware on_request & Hybrid HTTP Auth Regression Tests
+# -----------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_resource_read_honors_rbac_middleware_on_request(mcp_server, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify resources/read goes through RBACMiddleware.on_request so admin sees all 6 tables."""
+    import mcp.types as types
+
+    handler = mcp_server._mcp_server.request_handlers[types.ReadResourceRequest]
+
+    # 1. Admin via MCP_DEFAULT_TOKEN -> sees 6 tables
+    monkeypatch.setenv("MCP_DEFAULT_TOKEN", "token-admin-demo")
+    req = types.ReadResourceRequest(
+        method="resources/read",
+        params=types.ReadResourceRequestParams(uri="schema://catalog"),
+    )
+    res_admin = await handler(req)
+    payload_admin = json.loads(res_admin.root.contents[0].text)
+    assert payload_admin["viewer_role"] == "admin"
+    assert payload_admin["tables_count"] == 6
+
+    # 2. Analyst via MCP_DEFAULT_TOKEN -> sees 4 tables
+    monkeypatch.setenv("MCP_DEFAULT_TOKEN", "token-analyst-demo")
+    res_analyst = await handler(req)
+    payload_analyst = json.loads(res_analyst.root.contents[0].text)
+    assert payload_analyst["viewer_role"] == "analyst"
+    assert payload_analyst["tables_count"] == 4
+
+
+@pytest.mark.asyncio
+async def test_hybrid_http_auth_middleware() -> None:
+    """Verify HybridHTTPAuthMiddleware handles unauthenticated, Bearer, x-api-key, and strict modes."""
+    from starlette.applications import Starlette
+    from starlette.responses import JSONResponse
+    from starlette.routing import Route
+    from httpx import AsyncClient, ASGITransport
+    from mcp_use.server.auth import get_access_token
+    from mcp_secure_db.security.rbac import HybridHTTPAuthMiddleware, SecureDBBearerAuthProvider
+
+    async def mcp_endpoint(request):
+        tok = get_access_token()
+        return JSONResponse({
+            "authenticated": tok is not None,
+            "role": tok.claims.get("role") if tok else "public_viewer",
+        })
+
+    app = Starlette(routes=[Route("/mcp", mcp_endpoint, methods=["POST", "GET"])])
+    app.add_middleware(
+        HybridHTTPAuthMiddleware,
+        auth_provider=SecureDBBearerAuthProvider(),
+        strict_auth=False,
+    )
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        # 1. Unauthenticated in Hybrid mode -> 200 OK, public_viewer
+        r_unauth = await client.post("/mcp")
+        assert r_unauth.status_code == 200
+        assert r_unauth.json() == {"authenticated": False, "role": "public_viewer"}
+
+        # 2. Valid Bearer token -> 200 OK, analyst
+        r_bearer = await client.post("/mcp", headers={"Authorization": "Bearer token-analyst-demo"})
+        assert r_bearer.status_code == 200
+        assert r_bearer.json() == {"authenticated": True, "role": "analyst"}
+
+        # 3. Valid x-api-key header -> 200 OK, admin
+        r_apikey = await client.post("/mcp", headers={"x-api-key": "token-admin-demo"})
+        assert r_apikey.status_code == 200
+        assert r_apikey.json() == {"authenticated": True, "role": "admin"}
+
+        # 4. Invalid Bearer token -> 401 Unauthorized
+        r_invalid = await client.post("/mcp", headers={"Authorization": "Bearer bad-token"})
+        assert r_invalid.status_code == 401
+        assert r_invalid.json()["error"] == "invalid_token"
+
+    # 5. Strict mode rejects unauthenticated /mcp requests with 401
+    strict_app = Starlette(routes=[Route("/mcp", mcp_endpoint, methods=["POST"])])
+    strict_app.add_middleware(
+        HybridHTTPAuthMiddleware,
+        auth_provider=SecureDBBearerAuthProvider(),
+        strict_auth=True,
+    )
+    async with AsyncClient(transport=ASGITransport(app=strict_app), base_url="http://testserver") as strict_client:
+        r_strict = await strict_client.post("/mcp")
+        assert r_strict.status_code == 401
+        assert r_strict.json()["error"] == "unauthorized"
+

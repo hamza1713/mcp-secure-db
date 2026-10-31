@@ -131,6 +131,27 @@ async def test_example_server_resources() -> None:
 
 
 @pytest.mark.asyncio
+async def test_example_server_resource_read_honors_rbac_on_request(monkeypatch: pytest.MonkeyPatch) -> None:
+    import mcp.types as types
+
+    handler = example_server._mcp_server.request_handlers[types.ReadResourceRequest]
+    req = types.ReadResourceRequest(
+        method="resources/read",
+        params=types.ReadResourceRequestParams(uri="schema://catalog"),
+    )
+
+    monkeypatch.setenv("MCP_DEFAULT_TOKEN", "token-admin-demo")
+    res_admin = await handler(req)
+    tables_admin = json.loads(res_admin.root.contents[0].text)
+    assert len(tables_admin) == 6
+
+    monkeypatch.setenv("MCP_DEFAULT_TOKEN", "token-analyst-demo")
+    res_analyst = await handler(req)
+    tables_analyst = json.loads(res_analyst.root.contents[0].text)
+    assert len(tables_analyst) == 4
+
+
+@pytest.mark.asyncio
 async def test_example_server_prompts() -> None:
     # executive_analytics
     p1 = await example_server.get_prompt("executive_analytics", {"focus": "mrr_growth"})

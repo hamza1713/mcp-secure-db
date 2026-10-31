@@ -54,13 +54,19 @@ from typing import Any, Literal
 
 import duckdb
 import sqlglot
+from mcp.server.lowlevel.server import request_ctx
 from mcp.types import CallToolRequestParams, PaginatedRequestParams, ToolAnnotations
 from mcp_use.server import Context, MCPServer
 from mcp_use.server.auth import AccessToken, BearerAuthProvider, get_access_token
+from mcp_use.server.auth.dependencies import set_access_token
 from mcp_use.server.middleware import CallNext, Middleware, ServerMiddlewareContext
 from pydantic import BaseModel, Field
 from sqlglot import exp
 from sqlglot.errors import ParseError
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.middleware.cors import CORSMiddleware
+from starlette.requests import Request
+from starlette.responses import JSONResponse, Response
 
 
 # =============================================================================
@@ -207,9 +213,94 @@ class ExampleBearerAuthProvider(BearerAuthProvider):
         )
 
 
+class HybridHTTPAuthMiddleware(BaseHTTPMiddleware):
+    """HTTP middleware supporting both Bearer/x-api-key tokens and Hybrid unauthenticated fallback."""
+
+    def __init__(
+        self,
+        app: Any,
+        auth_provider: ExampleBearerAuthProvider,
+        strict_auth: bool = False,
+    ) -> None:
+        super().__init__(app)
+        self.auth_provider = auth_provider
+        self.strict_auth = strict_auth
+
+    async def dispatch(self, request: Request, call_next: Any) -> Response:
+        mcp_path = "/mcp"
+        if not request.url.path.startswith(mcp_path) or request.method == "OPTIONS":
+            set_access_token(None)
+            return await call_next(request)
+
+        auth_header = request.headers.get("authorization")
+        api_key_header = request.headers.get("x-api-key")
+        raw_token: str | None = None
+
+        if auth_header:
+            if auth_header.lower().startswith("bearer "):
+                raw_token = auth_header[7:].strip()
+            else:
+                raw_token = auth_header.strip()
+        elif api_key_header:
+            raw_token = api_key_header.strip()
+
+        if raw_token:
+            access_token = await self.auth_provider.verify_token(raw_token)
+            if access_token is None:
+                set_access_token(None)
+                return JSONResponse(
+                    {
+                        "error": "invalid_token",
+                        "error_description": (
+                            "Invalid authentication token. Valid demo tokens: "
+                            "'token-viewer-demo', 'token-analyst-demo', 'token-admin-demo'."
+                        ),
+                    },
+                    status_code=401,
+                    headers={"WWW-Authenticate": "Bearer"},
+                )
+            set_access_token(access_token)
+            request.state.access_token = access_token
+            try:
+                return await call_next(request)
+            finally:
+                set_access_token(None)
+
+        env_strict = os.environ.get("MCP_STRICT_AUTH", "false").lower() in ("1", "true", "yes")
+        if self.strict_auth or env_strict:
+            set_access_token(None)
+            return JSONResponse(
+                {
+                    "error": "unauthorized",
+                    "error_description": "Authentication required (strict mode enabled).",
+                },
+                status_code=401,
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+
+        set_access_token(None)
+        return await call_next(request)
+
+
 class RBACMiddleware(Middleware):
-    def __init__(self, audit_logger: AuditLogger | None = None) -> None:
+    def __init__(self, audit_logger: AuditLogger | None = None, strict_auth: bool = False) -> None:
         self.audit_logger = audit_logger
+        self.strict_auth = strict_auth
+
+    def _extract_headers(self, context: ServerMiddlewareContext[Any]) -> dict[str, str]:
+        raw_headers: dict[str, str] = {}
+        if context.headers:
+            raw_headers.update({k.lower(): v for k, v in context.headers.items()})
+        try:
+            req_ctx = request_ctx.get()
+            if req_ctx and getattr(req_ctx, "request", None) is not None:
+                req_headers = getattr(req_ctx.request, "headers", None)
+                if req_headers:
+                    for k, v in req_headers.items():
+                        raw_headers.setdefault(str(k).lower(), str(v))
+        except LookupError:
+            pass
+        return raw_headers
 
     def _resolve(self, context: ServerMiddlewareContext[Any]) -> CallerPrincipal:
         token = get_access_token()
@@ -226,7 +317,7 @@ class RBACMiddleware(Middleware):
                 authenticated_via="mcp_use_token",
             )
 
-        headers = {k.lower(): v for k, v in (context.headers or {}).items()}
+        headers = self._extract_headers(context)
         explicit = headers.get("authorization") or headers.get("x-api-key")
         if explicit:
             principal = resolve_token(explicit)
@@ -238,6 +329,10 @@ class RBACMiddleware(Middleware):
         if env_token and (p := resolve_token(env_token)):
             return p
 
+        env_strict = os.environ.get("MCP_STRICT_AUTH", "false").lower() in ("1", "true", "yes")
+        if self.strict_auth or env_strict:
+            raise PermissionError("Authentication required in strict mode.")
+
         return CallerPrincipal(
             subject="default-viewer",
             email="viewer@demo.local",
@@ -245,6 +340,15 @@ class RBACMiddleware(Middleware):
             scopes=["schema:read"],
             authenticated_via="fallback",
         )
+
+    async def on_request(
+        self,
+        context: ServerMiddlewareContext[Any],
+        call_next: CallNext[Any, Any],
+    ) -> Any:
+        principal = self._resolve(context)
+        set_current_principal(principal)
+        return await call_next(context)
 
     async def on_list_tools(
         self,
@@ -644,15 +748,40 @@ TableNameLiteral = Literal[
     "security_incidents",
 ]
 
+class SecureDBExampleServer(MCPServer):
+    def __init__(self, *args: Any, hybrid_auth_provider: ExampleBearerAuthProvider | None = None, strict_auth: bool = False, **kwargs: Any) -> None:
+        self._hybrid_auth_provider = hybrid_auth_provider or ExampleBearerAuthProvider()
+        self._strict_auth = strict_auth
+        super().__init__(*args, **kwargs)
+
+    def streamable_http_app(self) -> Any:
+        app = super().streamable_http_app()
+        app.add_middleware(
+            HybridHTTPAuthMiddleware,
+            auth_provider=self._hybrid_auth_provider,
+            strict_auth=self._strict_auth,
+        )
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=["*"],
+            allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
+            allow_headers=["*"],
+            expose_headers=["WWW-Authenticate", "mcp-session-id", "mcp-protocol-version"],
+        )
+        return app
+
+
 engine = SecureDBEngine()
 rbac = RBACMiddleware(audit_logger=engine.audit)
+auth_provider = ExampleBearerAuthProvider()
 
-server = MCPServer(
+server = SecureDBExampleServer(
     name="mcp-secure-db-demo",
     version="1.0.0",
     instructions="4-layer sandboxed analytical database MCP server with AST validation & DuckDB limits.",
     middleware=[rbac],
-    auth=ExampleBearerAuthProvider(),
+    hybrid_auth_provider=auth_provider,
+    debug=True,
 )
 
 
@@ -756,8 +885,10 @@ server._wrap_handlers_with_middleware()
 
 
 if __name__ == "__main__":
+    host = os.environ.get("HOST", "127.0.0.1")
+    port = int(os.environ.get("PORT", "8000"))
     print("=" * 60)
     print("Starting Self-Contained MCP Secure DB Server Example")
     print("Demo Tokens: token-viewer-demo, token-analyst-demo, token-admin-demo")
     print("=" * 60)
-    server.run(transport="streamable-http", host="0.0.0.0", port=8000)
+    server.run(transport="streamable-http", host=host, port=port)

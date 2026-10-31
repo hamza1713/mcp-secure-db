@@ -8,10 +8,16 @@ from contextvars import ContextVar
 from enum import StrEnum
 from typing import Any
 
+from mcp.server.lowlevel.server import request_ctx
 from mcp.types import CallToolRequestParams, PaginatedRequestParams
 from mcp_use.server.auth import AccessToken, BearerAuthProvider, get_access_token
+from mcp_use.server.auth.dependencies import set_access_token
 from mcp_use.server.middleware import CallNext, Middleware, ServerMiddlewareContext
 from pydantic import BaseModel, Field
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.middleware.cors import CORSMiddleware
+from starlette.requests import Request
+from starlette.responses import JSONResponse, Response
 
 
 class Role(StrEnum):
@@ -181,7 +187,7 @@ def resolve_principal_from_token(raw_token: str | None) -> CallerPrincipal | Non
 
 
 class SecureDBBearerAuthProvider(BearerAuthProvider):
-    """Native mcp-use BearerAuthProvider implementation for strict HTTP Bearer setups."""
+    """Native mcp-use BearerAuthProvider implementation for HTTP Bearer and API key setups."""
 
     async def verify_token(self, token: str) -> AccessToken | None:
         principal = resolve_principal_from_token(token)
@@ -198,18 +204,105 @@ class SecureDBBearerAuthProvider(BearerAuthProvider):
         )
 
 
+class HybridHTTPAuthMiddleware(BaseHTTPMiddleware):
+    """ASGI HTTP middleware supporting both strict BearerAuth and Hybrid public_viewer fallback.
+
+    - Validates `Authorization: Bearer <token>` and `x-api-key: <token>` using `SecureDBBearerAuthProvider`.
+    - Rejects invalid tokens immediately with HTTP 401 (`invalid_token`).
+    - When `strict_auth=True`, rejects unauthenticated requests to `/mcp` with HTTP 401 (`unauthorized`).
+    - When `strict_auth=False` (default Hybrid mode), allows unauthenticated requests through with
+      `set_access_token(None)` so `RBACMiddleware` gracefully assigns `Role.PUBLIC_VIEWER`.
+    """
+
+    def __init__(
+        self,
+        app: Any,
+        auth_provider: BearerAuthProvider,
+        strict_auth: bool = False,
+        audit_callback: Callable[[str, Role, str, str], None] | None = None,
+    ) -> None:
+        super().__init__(app)
+        self.auth_provider = auth_provider
+        self.strict_auth = strict_auth
+        self.audit_callback = audit_callback
+        self.exclude_paths = ("/health", "/docs", "/inspector", "/openmcp.json")
+
+    async def dispatch(self, request: Request, call_next: Callable[[Request], Any]) -> Response:
+        if request.method == "OPTIONS":
+            set_access_token(None)
+            return await call_next(request)
+
+        path = request.url.path
+        if any(path == p or path.startswith(f"{p}/") for p in self.exclude_paths):
+            set_access_token(None)
+            return await call_next(request)
+
+        auth_header = request.headers.get("Authorization", "").strip()
+        api_key_header = request.headers.get("x-api-key", "").strip()
+
+        raw_token: str | None = None
+        if auth_header:
+            raw_token = auth_header[7:].strip() if auth_header.lower().startswith("bearer ") else auth_header
+        elif api_key_header:
+            raw_token = api_key_header
+
+        if raw_token:
+            access_token = await self.auth_provider.verify_token(raw_token)
+            if access_token is not None:
+                set_access_token(access_token)
+                return await call_next(request)
+
+            set_access_token(None)
+            if self.audit_callback:
+                self.audit_callback(
+                    path,
+                    Role.PUBLIC_VIEWER,
+                    "BLOCKED_RBAC",
+                    "Invalid Bearer or x-api-key token supplied in HTTP headers",
+                )
+            return JSONResponse(
+                status_code=401,
+                content={
+                    "error": "invalid_token",
+                    "error_description": "Token is invalid or expired",
+                },
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+
+        set_access_token(None)
+        if self.strict_auth and (path == "/mcp" or path.startswith("/mcp/")):
+            if self.audit_callback:
+                self.audit_callback(
+                    path,
+                    Role.PUBLIC_VIEWER,
+                    "BLOCKED_RBAC",
+                    "Missing authentication token in strict_auth mode",
+                )
+            return JSONResponse(
+                status_code=401,
+                content={
+                    "error": "unauthorized",
+                    "error_description": "Authentication required",
+                },
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+
+        return await call_next(request)
+
+
 class RBACMiddleware(Middleware):
     """Hybrid RBAC Middleware for mcp-use servers.
 
     Features:
     1. Resolves caller identity from:
-       - mcp-use `get_access_token()` (if BearerAuthProvider is attached)
+       - mcp-use `get_access_token()` (populated by HybridHTTPAuthMiddleware / BearerAuthProvider)
        - HTTP headers (`Authorization: Bearer <token>` or `x-api-key: <token>`)
        - Environment fallback (`MCP_DEFAULT_TOKEN` or `MCP_DEFAULT_ROLE`), defaulting
          gracefully to `public_viewer` so MCP Inspector & stdio work out-of-the-box.
-    2. Dynamically filters `tools/list` (`on_list_tools`) so unauthorized tools are
+    2. Binds caller principal across all MCP protocol requests (`on_request`), including resources & prompts.
+    3. Dynamically filters `tools/list` (`on_list_tools`) so unauthorized tools are
        invisible to lower-privileged agents.
-    3. Enforces hard authorization on `tools/call` (`on_call_tool`) before execution.
+    4. Enforces hard authorization on `tools/call` (`on_call_tool`) before execution.
     """
 
     def __init__(
@@ -221,6 +314,20 @@ class RBACMiddleware(Middleware):
             strict_auth = os.environ.get("MCP_STRICT_AUTH", "false").lower() in {"1", "true", "yes"}
         self.strict_auth = strict_auth
         self.audit_callback = audit_callback
+
+    @staticmethod
+    def _extract_headers(context: ServerMiddlewareContext[Any]) -> dict[str, str]:
+        """Extract headers from ServerMiddlewareContext or active Starlette request context."""
+        if context.headers:
+            return {k.lower(): v for k, v in context.headers.items()}
+        try:
+            ctx = request_ctx.get()
+            req = getattr(ctx, "request", None)
+            if req is not None and hasattr(req, "headers"):
+                return {k.lower(): v for k, v in req.headers.items()}
+        except LookupError:
+            pass
+        return {}
 
     def _resolve_caller(self, context: ServerMiddlewareContext[Any]) -> CallerPrincipal:
         """Resolve and validate the caller's role from headers, AccessToken, or fallback."""
@@ -241,7 +348,7 @@ class RBACMiddleware(Middleware):
             )
 
         # 2. Check HTTP headers (case-insensitive)
-        headers = {k.lower(): v for k, v in (context.headers or {}).items()}
+        headers = self._extract_headers(context)
         auth_header = headers.get("authorization")
         api_key_header = headers.get("x-api-key")
 
@@ -299,6 +406,16 @@ class RBACMiddleware(Middleware):
             scopes=scopes_by_role[fallback_role],
             authenticated_via="hybrid_default_fallback",
         )
+
+    async def on_request(
+        self,
+        context: ServerMiddlewareContext[Any],
+        call_next: CallNext[Any, Any],
+    ) -> Any:
+        """Bind caller principal on every MCP request (including resources/read and prompts/get)."""
+        principal = self._resolve_caller(context)
+        set_current_principal(principal)
+        return await call_next(context)
 
     async def on_list_tools(
         self,

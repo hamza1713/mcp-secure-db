@@ -8,6 +8,8 @@ from typing import Any, Literal
 
 from mcp.types import ToolAnnotations
 from mcp_use.server import Context, MCPServer
+from mcp_use.server.logging import MCPLoggingMiddleware
+from starlette.middleware.cors import CORSMiddleware
 
 from mcp_secure_db import __version__
 from mcp_secure_db.database.engine import AuditLogger, SecureDuckDBEngine
@@ -18,6 +20,7 @@ from mcp_secure_db.security.rbac import (
     ROLE_ALLOWED_TOOLS,
     SAFE_COLUMNS_BY_TABLE,
     CallerPrincipal,
+    HybridHTTPAuthMiddleware,
     RBACMiddleware,
     Role,
     SecureDBBearerAuthProvider,
@@ -78,6 +81,40 @@ async def safe_ctx_progress(ctx: Context | None, current: float, total: float) -
             pass
 
 
+class SecureDBMCPServer(MCPServer):
+    """MCPServer subclass integrating HybridHTTPAuthMiddleware for seamless Inspector + Bearer/API-key auth."""
+
+    _strict_auth: bool = False
+    _audit_callback: Any = None
+
+    def streamable_http_app(self):
+        from mcp.server.fastmcp import FastMCP
+
+        app = FastMCP.streamable_http_app(self)
+        app.add_middleware(
+            MCPLoggingMiddleware,
+            debug_level=self.debug_level,
+            mcp_path=self.mcp_path,
+            pretty_print_jsonrpc=self.pretty_print_jsonrpc,
+        )
+        if self._auth:
+            app.add_middleware(
+                HybridHTTPAuthMiddleware,
+                auth_provider=self._auth,
+                strict_auth=self._strict_auth,
+                audit_callback=self._audit_callback,
+            )
+            app.add_middleware(
+                CORSMiddleware,
+                allow_origins=["*"],
+                allow_credentials=False,
+                allow_methods=["GET", "POST", "OPTIONS", "DELETE"],
+                allow_headers=["*"],
+                expose_headers=["WWW-Authenticate", "mcp-session-id"],
+            )
+        return app
+
+
 def create_server(
     engine: SecureDuckDBEngine | None = None,
     rbac_middleware: RBACMiddleware | None = None,
@@ -102,7 +139,10 @@ def create_server(
             audit_callback=engine.audit_logger.record_rbac_event,
         )
 
-    server = MCPServer(
+    SecureDBMCPServer._strict_auth = rbac_middleware.strict_auth
+    SecureDBMCPServer._audit_callback = engine.audit_logger.record_rbac_event
+
+    server = SecureDBMCPServer(
         name="mcp-secure-db",
         version=__version__,
         instructions=(
