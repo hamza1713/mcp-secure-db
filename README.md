@@ -1,6 +1,6 @@
 # mcp-secure-db (TypeScript)
 
-> **Reference implementation and proof of concept for layered SQL query guardrails over MCP**  
+> **Hardened reference implementation and proof of concept for layered SQL query guardrails over MCP**  
 > Built with the `mcp-use` TypeScript SDK (`2.12.2` [E:CLAIM-001]), `node-sql-parser` (`5.4.0` [E:CLAIM-002]), and a worker-isolated `node:sqlite` sandbox [E:CLAIM-025] [E:CLAIM-026].
 
 ---
@@ -8,16 +8,17 @@
 ## 1. Overview and Scope
 
 Exposing analytical databases to AI agents over the **Model Context Protocol (MCP)** introduces concrete security and operational risks:
-1. **Mutating or administrative SQL**: Prompt-injected or malformed agent calls attempting `DROP`, `ALTER`, `DELETE`, `UPDATE`, `INSERT`, `PRAGMA`, or `ATTACH`.
-2. **Non-allowlisted functions and extension loading**: Queries invoking `load_extension` or unexpected SQLite functions.
-3. **Expensive joins and runaway recursive queries**: Unconstrained Cartesian joins or CPU-heavy recursive CTEs blocking the server process.
-4. **Over-broad table and sensitive-column access**: Agents reading restricted tables or sensitive columns via aliases, CTEs, subqueries, expressions, views, or wildcards.
+1. **Mutating or administrative SQL**: Prompt-injected or malformed agent calls attempting `DROP`, `ALTER`, `DELETE`, `UPDATE`, `INSERT`, `PRAGMA`, or `ATTACH` [E:CLAIM-004].
+2. **Non-allowlisted functions and extension loading**: Queries invoking `load_extension` or unexpected SQLite functions [E:CLAIM-018].
+3. **Expensive joins and runaway recursive queries**: Unconstrained Cartesian joins or CPU-heavy recursive CTEs blocking the server process [E:CLAIM-019], [E:CLAIM-025].
+4. **Over-broad table and sensitive-column access**: Agents reading restricted tables or sensitive columns via aliases, CTEs, subqueries, expressions, views, or wildcards [E:CLAIM-020].
+5. **Prompt injection via database records (Lethal Trifecta)**: Downstream models following prompt injections stored in database text fields [E:CLAIM-046].
 
-`mcp-secure-db` is an open-source **reference implementation and proof of concept** demonstrating layered controls for read-only analytical SQL over MCP, paired with an automated claims linter (`scripts/claims-lint.ts` [E:CLAIM-037]) and dependency pinning verifier (`scripts/verify-deps.ts` [E:CLAIM-038]).
+`mcp-secure-db` is an open-source **hardened reference implementation and proof of concept** demonstrating six layered controls for read-only analytical SQL over MCP, paired with an automated claims linter (`scripts/claims-lint.ts` [E:CLAIM-037]) and dependency pinning verifier (`scripts/verify-deps.ts` [E:CLAIM-038]).
 
 ---
 
-## 2. Four-Layer Architecture
+## 2. Six-Layer Architecture
 
 ```
 ┌────────────────────────────────────────────────────────────────────────┐
@@ -41,10 +42,19 @@ Exposing analytical databases to AI agents over the **Model Context Protocol (MC
 │  - Compile-time `setAuthorizer` independently checks actions, tables,  │
 │    base columns (including through SQL views), and allowlisted funcs   │
 ├────────────────────────────────────────────────────────────────────────┤
-│  LAYER 4: Fail-Closed Result Policy & Recent-Events Audit Buffer       │
+│  LAYER 4: Worker Thread Sandbox & Hard Deadline                        │
+│  - Enforces strict execution deadline (default 5000ms, test 800ms)     │
+│  - Hard worker termination via `worker.terminate()` on slow queries    │
+│  - Automatic clean worker respawn after termination                    │
+├────────────────────────────────────────────────────────────────────────┤
+│  LAYER 5: Result-Level PII Policy & Untrusted Data Tagging             │
 │  - Scans output columns and cell values for restricted PII patterns    │
-│  - Records allowed and blocked calls in an in-memory buffer            │
-│    (explicitly non-durable across restarts)                            │
+│  - Annotates responses with `untrustedData: true` and safety notices   │
+├────────────────────────────────────────────────────────────────────────┤
+│  LAYER 6: Rate Limiting & Persistent Redacted Audit Logging            │
+│  - Per-principal query rate limits and cumulative row egress budgets   │
+│  - Dual-tier logging: in-memory ring buffer plus append-only redacted  │
+│    JSONL file on disk (`data/audit.jsonl`)                             │
 └────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -57,7 +67,24 @@ Exposing analytical databases to AI agents over the **Model Context Protocol (MC
 
 ---
 
-## 3. Authentication and Role Model
+## 3. Measured Performance Benchmarks
+
+Pre-execution AST validation latencies were measured using `bench/validator.bench.ts` under Node v24.12.0 x64 (1,000 warm-up iterations + 10,000 timed iterations per query) [E:CLAIM-022]:
+
+| Query Type | p50 Latency | p90 Latency | p95 Latency | p99 Latency | Throughput | Evidence Reference |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **Simple Projection** (`SELECT id, name, plan FROM customers`) | **0.334 ms** | 0.667 ms | 1.102 ms | 3.344 ms | 1668 ops/sec | [E:CLAIM-022] (`bench/results.json`) |
+| **Relational Join** (`customers` JOIN `api_usage`) | **0.395 ms** | 0.832 ms | 1.030 ms | 1.904 ms | 1848 ops/sec | [E:CLAIM-022] (`bench/results.json`) |
+| **Aggregate with Grouping** (`COUNT(*)`, `SUM()`, `GROUP BY`) | **0.725 ms** | 2.059 ms | 3.509 ms | 11.280 ms | 751 ops/sec | [E:CLAIM-022] (`bench/results.json`) |
+
+Run the benchmark suite locally with:
+```bash
+pnpm run bench
+```
+
+---
+
+## 4. Authentication and Role Model
 
 Authentication enforces **default-deny** [E:CLAIM-017]:
 - Verified OAuth access tokens (`ctx.auth` in `mcp-use` `2.12.2` [E:CLAIM-013]) are checked first (`db:read:metadata`, `db:execute:analytics`, `db:audit:read`, `db:pii:access`).
@@ -74,13 +101,21 @@ Authentication enforces **default-deny** [E:CLAIM-017]:
 
 ---
 
-## 4. Quick Start and Verification
+## 5. Verification and Test Suite
 
-### Prerequisites
-* Node.js `>= 22.13.0` (Node `24` recommended and used in CI/Docker [E:CLAIM-011])
-* `pnpm`
+The test suite includes 181 automated tests across 15 test files [E:CLAIM-048]:
 
-### Commands
+- **Bypass Corpus (`tests/bypass-corpus/`)**: 32 structured adversarial vectors covering comment tricks, unicode, quoting, function I/O exploits, CTE mutations, and Cartesian joins [E:CLAIM-039].
+- **Differential Testing (`tests/differential.test.ts`)**: 93 queries compared across AST validator and real SQLite authorizer to confirm zero security divergences [E:CLAIM-040].
+- **Grammar & Mutation Fuzzing (`tests/fuzz.test.ts`)**: 300 queries generated by PRNG, validating engine safety invariants [E:CLAIM-041].
+- **Self Red-Team Pass (`tests/red-team-self.test.ts`)**: 32 adversarial test cases verifying all fail closed [E:CLAIM-042].
+- **Worker Timeout & Pragmas (`tests/sqlite-controls.test.ts`)**: Verifies hard worker-thread deadline termination on slow recursive CTEs [E:CLAIM-025].
+- **Result PII Protection (`tests/pii-bypass.test.ts`)**: 25 tests proving fail-closed blocking across views, CTEs, subqueries, aliases, and cell values [E:CLAIM-020].
+- **Experimental PostgreSQL Adapter (`tests/postgres-adapter.test.ts`)**: Validates read-only transaction parameters, `statement_timeout`, and schema allowlists [E:CLAIM-043].
+- **Rate Limiting & Audit (`tests/rate-limiter.test.ts`, `tests/audit.test.ts`)**: Tests per-principal rate limits, row budgets, and sensitive literal redaction [E:CLAIM-044], [E:CLAIM-045].
+- **Claims Linter (`tests/claims-lint.test.ts`)**: Enforces claims-evidence mapping in CI [E:CLAIM-037].
+
+### Quickstart Commands
 
 ```bash
 # 1. Install pinned dependencies from lockfile
@@ -93,28 +128,43 @@ pnpm audit --audit-level=high
 # 3. Run TypeScript type checks
 pnpm run typecheck
 
-# 4. Run Vitest suite, claims-lint, and verify-deps
+# 4. Run test suite, claims linter, and dependency verification
 pnpm test
 
-# 5. Build the server bundle
+# 5. Run reproducible validator latency benchmark
+pnpm run bench
+
+# 6. Build the server bundle
 pnpm run build
 ```
 
 ---
 
-## 5. Limitations and Non-Goals
+## 6. Limitations and Non-Goals
 
-- **Does not prevent prompt injection:** The validator, SQLite authorizer, and worker sandbox limit what SQL operations an injected instruction can execute; they do **not** stop a prompt-injected agent from reading data its authenticated role is permitted to access.
+- **Does not stop downstream prompt injection:** The validator, SQLite authorizer, and worker sandbox limit what SQL operations an injected instruction can execute; they do **not** stop a prompt-injected agent from reading data its authenticated role is permitted to access. Response data is tagged with `untrustedData: true` to assist calling models [E:CLAIM-046].
 - **Inference and aggregation on permitted columns:** Statistical or multi-query inference over non-PII columns that a role is allowed to query remains possible.
 - **`node:sqlite` experimental status:** Built-in `node:sqlite` emits an `ExperimentalWarning` in Node.js and may evolve across Node releases.
 - **Demo dataset scope:** Default execution runs against 4 seeded in-memory SQLite tables [E:CLAIM-009] and is not evidence of production behavior against external cloud data warehouses.
-- **In-memory audit buffer durability:** The 100-entry ring buffer is an in-memory debugging cache and is not durable across process restarts [E:CLAIM-027].
-- **Not a formal proof:** Parser, authorizer, and result-level checks reduce risk for tested patterns; they do not constitute formal verification.
+- **In-memory audit buffer durability:** The 100-entry ring buffer is an in-memory debugging cache and is not durable across process restarts [E:CLAIM-027]. A persistent append-only log is written to `data/audit.jsonl` [E:CLAIM-045].
+- **Experimental PostgreSQL adapter:** The PostgreSQL adapter (`src/database/postgres-adapter.ts`) is marked `EXPERIMENTAL` and requires validation against target PostgreSQL cluster deployments [E:CLAIM-043].
+- **Not a formal security proof:** Parser, authorizer, and result-level checks reduce risk for tested patterns; they do not constitute a formal proof of security.
 - **No regulatory compliance claim:** No claim of GDPR, HIPAA, SOC 2, or PCI compliance is made, and this software is out of scope for regulatory compliance certification.
-- **Independent review pending:** All tests in this repository were written alongside the code; independent human security review is recommended before any production deployment.
+- **Independent review recommendation:** All tests in this repository were written alongside the code; independent human security review is recommended before any production deployment.
 
 ---
 
-## 6. License
+## 7. Documentation Index
+
+- `docs/THREAT_MODEL.md`: Lethal-trifecta analysis, layer boundaries, and OWASP MCP / LLM Top 10 coverage matrix [E:CLAIM-047].
+- `docs/TECHNICAL_REPORT.md`: Comprehensive engineering report and forensic audit findings.
+- `docs/CONTRIBUTION_BRIEF.md`: Partner brief and upstream contribution proposals for Manufact / `mcp-use`.
+- `docs/CLAIMS.md`: Complete claims ledger mapping every claim to verified evidence.
+- `docs/FINDINGS.md`: Register of all 15 audit findings with root cause and remediation status.
+- `docs/OPEN_QUESTIONS.md`: Register of unverified external facts and future research items.
+
+---
+
+## 8. License
 
 MIT

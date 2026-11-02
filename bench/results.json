@@ -7,19 +7,19 @@
       "cpuModel": "Intel(R) Core(TM) i5-5300U CPU @ 2.30GHz",
       "cpuCores": 4
     },
-    "timestamp": "2026-11-02T13:28:40.141Z",
+    "timestamp": "2026-11-02T13:37:25.695Z",
     "query": "SELECT id, name, plan FROM customers",
     "metrics": {
       "iterations": 10000,
       "warmupIterations": 1000,
-      "minMs": 0.246,
-      "p50Ms": 0.372,
-      "p90Ms": 0.877,
-      "p95Ms": 1.669,
-      "p99Ms": 8.824,
-      "maxMs": 116.792,
-      "meanMs": 0.842,
-      "opsPerSec": 1187.5
+      "minMs": 0.256,
+      "p50Ms": 0.419,
+      "p90Ms": 1.176,
+      "p95Ms": 2.243,
+      "p99Ms": 7.589,
+      "maxMs": 86.798,
+      "meanMs": 0.821,
+      "opsPerSec": 1217.5
     }
   },
   {
@@ -30,19 +30,19 @@
       "cpuModel": "Intel(R) Core(TM) i5-5300U CPU @ 2.30GHz",
       "cpuCores": 4
     },
-    "timestamp": "2026-11-02T13:28:52.561Z",
+    "timestamp": "2026-11-02T13:37:38.102Z",
     "query": "SELECT endpoint, COUNT(*), SUM(request_count) FROM api_usage WHERE compute_ms > 100000 GROUP BY endpoint",
     "metrics": {
       "iterations": 10000,
       "warmupIterations": 1000,
-      "minMs": 0.281,
-      "p50Ms": 0.671,
-      "p90Ms": 1.403,
-      "p95Ms": 2.179,
-      "p99Ms": 8.83,
-      "maxMs": 70.482,
-      "meanMs": 1.071,
-      "opsPerSec": 934
+      "minMs": 0.442,
+      "p50Ms": 0.685,
+      "p90Ms": 1.503,
+      "p95Ms": 2.54,
+      "p99Ms": 7.365,
+      "maxMs": 50.168,
+      "meanMs": 1.046,
+      "opsPerSec": 956.4
     }
   },
   {
@@ -53,19 +53,19 @@
       "cpuModel": "Intel(R) Core(TM) i5-5300U CPU @ 2.30GHz",
       "cpuCores": 4
     },
-    "timestamp": "2026-11-02T13:28:58.738Z",
+    "timestamp": "2026-11-02T13:37:44.275Z",
     "query": "SELECT c.name, u.endpoint, u.request_count FROM customers c JOIN api_usage u ON c.id = u.customer_id WHERE c.plan = 'enterprise' LIMIT 50",
     "metrics": {
       "iterations": 10000,
       "warmupIterations": 1000,
-      "minMs": 0.32,
-      "p50Ms": 0.385,
-      "p90Ms": 0.812,
-      "p95Ms": 1.002,
-      "p99Ms": 1.891,
-      "maxMs": 37.639,
-      "meanMs": 0.554,
-      "opsPerSec": 1803.8
+      "minMs": 0.33,
+      "p50Ms": 0.38,
+      "p90Ms": 0.752,
+      "p95Ms": 0.865,
+      "p99Ms": 1.716,
+      "maxMs": 34.489,
+      "meanMs": 0.532,
+      "opsPerSec": 1878.1
     }
   }
 ]
