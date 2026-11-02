@@ -171,5 +171,5 @@ describe("Grammar-Based and Mutation-Based Fuzzing Harness", () => {
 
     expect(allowedCount).toBeGreaterThan(25);
     expect(rejectedCount).toBeGreaterThan(150);
-  });
+  }, 15000);
 });

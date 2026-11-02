@@ -4,6 +4,7 @@ import { rbacManager } from "./security/rbac.js";
 import { dbEngine } from "./database/engine.js";
 import { sqlValidator } from "./security/validator.js";
 import { auditLogger } from "./database/audit.js";
+import { defaultRateLimiter } from "./security/rate-limiter.js";
 import { TABLE_METADATA } from "./database/seed.js";
 import { SecurityContext, UserRole } from "./types.js";
 
@@ -287,12 +288,42 @@ export async function handleExecuteAnalyticalSql(
     return denyToolCall(secCtx, "execute_analytical_sql", "analyst", query);
   }
 
+  // Cost gating and rate limiter check
+  const rateCheck = defaultRateLimiter.checkQueryAllowed(
+    secCtx.principal,
+    secCtx.role
+  );
+  if (!rateCheck.allowed) {
+    auditLogger.log({
+      principal: secCtx.principal,
+      role: secCtx.role,
+      tool: "execute_analytical_sql",
+      query,
+      status: "BLOCKED_RATE_LIMIT",
+      reason: rateCheck.reason,
+    });
+    return {
+      isError: true,
+      content: [
+        {
+          type: "text" as const,
+          text: `RateLimitExceeded: ${rateCheck.reason}`,
+        },
+      ],
+    };
+  }
+
   try {
     const result = await dbEngine.executeQuery(
       query,
       secCtx.role,
       secCtx.principal
     );
+
+    // Record consumed query and row budget
+    defaultRateLimiter.recordQuery(secCtx.principal);
+    defaultRateLimiter.recordRows(secCtx.principal, result.rowCount);
+
     return {
       content: [
         {
@@ -330,6 +361,7 @@ export async function handleGetSecurityAuditLog(
   }
 
   const entries = auditLogger.getEntries(limit);
+  const persistentEntries = auditLogger.getPersistentEntries(limit);
   const stats = auditLogger.getStats();
 
   return {
@@ -339,10 +371,12 @@ export async function handleGetSecurityAuditLog(
         text: JSON.stringify(
           {
             durabilityNotice:
-              "In-memory recent-events buffer (not durable across restarts).",
+              "In-memory ring buffer (non-durable cache across restarts). Persistent append-only log written to data/audit.jsonl with sensitive literals redacted.",
+            persistentLogPath: auditLogger.getLogFilePath(),
             stats,
             returnedEntries: entries.length,
             entries,
+            persistentEntries,
           },
           null,
           2

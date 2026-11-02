@@ -62,6 +62,8 @@ export interface QueryExecutionResult {
   columns: string[];
   rows: Record<string, unknown>[];
   authorizerOperations: number;
+  untrustedData: boolean;
+  untrustedDataNotice: string;
   sandbox: {
     engine: string;
     workerThread: boolean;
@@ -80,6 +82,7 @@ export type AuditStatus =
   | "BLOCKED_AST"
   | "BLOCKED_AUTHORIZER"
   | "BLOCKED_RESULT_POLICY"
+  | "BLOCKED_RATE_LIMIT"
   | "TIMEOUT"
   | "ERROR";
 
@@ -94,6 +97,8 @@ export interface AuditLogEntry {
   executionTimeMs?: number;
   rowCount?: number;
   reason?: string;
+  ruleFired?: string;
+  persisted?: boolean;
 }
 
 export interface ValidationResult {

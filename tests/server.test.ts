@@ -310,6 +310,8 @@ describe("MCP Server End-to-End Suite", () => {
       expect(body.rowCount).toBe(5);
       expect(body.sandbox.role).toBe("analyst");
       expect(body.sandbox.workerThread).toBe(true);
+      expect(body.untrustedData).toBe(true);
+      expect(body.untrustedDataNotice).toContain("untrusted user/system content");
     });
 
     it("should block mutating queries even when called by admin", async () => {
@@ -344,9 +346,11 @@ describe("MCP Server End-to-End Suite", () => {
       );
       expect(res.isError).toBeUndefined();
       const body = JSON.parse(res.content[0].text);
-      expect(body.durabilityNotice).toContain("not durable");
+      expect(body.durabilityNotice).toContain("non-durable");
       expect(body.stats).toBeDefined();
       expect(body.entries).toBeDefined();
+      expect(body.persistentEntries).toBeDefined();
+      expect(body.persistentLogPath).toBeDefined();
     });
   });
 });

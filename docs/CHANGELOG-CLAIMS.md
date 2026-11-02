@@ -66,3 +66,12 @@ Tracks every claim added, softened, removed, or newly supported across remediati
 - `CLAIM-040` (`SUPPORTED`) [E:CLAIM-040]: Differential test harness in `tests/differential.test.ts` executing 93 queries across `SQLValidator` and real SQLite (`node:sqlite` with authorizer), proving zero security divergences.
 - `CLAIM-041` (`SUPPORTED`) [E:CLAIM-041]: Seeded deterministic PRNG grammar and mutation fuzzer in `tests/fuzz.test.ts` executing 300 queries, asserting that every validator-allowed query executes safely in real SQLite.
 - `CLAIM-042` (`SUPPORTED`) [E:CLAIM-042]: Dedicated self red-team pass in `tests/red-team-self.test.ts` evaluating 32 distinct adversarial attack vectors against all security layers, verifying all 32 fail closed.
+
+## Phase 4 — Defense in Depth and Containment
+
+### Newly Supported Claims (`docs/CLAIMS.md`)
+- `CLAIM-043` (`SUPPORTED`) [E:CLAIM-043]: Added experimental PostgreSQL adapter in `src/database/postgres-adapter.ts` with read-only transaction parameters, `statement_timeout`, and schema/table allowlists, verified in `tests/postgres-adapter.test.ts`.
+- `CLAIM-044` (`SUPPORTED`) [E:CLAIM-044]: Added per-principal sliding-window rate limiter and row-budget accounting in `src/security/rate-limiter.ts`, verified in `tests/rate-limiter.test.ts`.
+- `CLAIM-045` (`SUPPORTED`) [E:CLAIM-045]: Implemented persistent append-only JSONL logging to `data/audit.jsonl` with sensitive literal scrubbing (emails, tokens, IPs) alongside an in-memory cache, verified in `tests/audit.test.ts`.
+- `CLAIM-046` (`SUPPORTED`) [E:CLAIM-046]: Added explicit `untrustedData: true` and prompt safety notices to database query result sets to mitigate prompt injection risk, verified in `tests/server.test.ts`.
+- `CLAIM-047` (`SUPPORTED`) [E:CLAIM-047]: Published comprehensive threat model in `docs/THREAT_MODEL.md` documenting the lethal-trifecta exposure, layer boundaries, and OWASP MCP / LLM Top 10 coverage.
