@@ -756,7 +756,7 @@ export class SQLValidator {
     // 5. Validate compound SELECT chain (UNION / UNION ALL / INTERSECT / EXCEPT)
     if (selectNode._next) {
       state.compoundCount++;
-      if (state.compoundCount > this.maxCompoundSelects) {
+      if (state.compoundCount >= this.maxCompoundSelects) {
         throw new Error(
           `Query exceeds maximum compound SELECT count of ${this.maxCompoundSelects}.`
         );
@@ -916,6 +916,20 @@ export class SQLValidator {
 
     if (node.type === "function" || node.type === "aggr_func") {
       const funcName = this.extractFunctionName(node);
+      const argValues = Array.isArray(node.args?.value)
+        ? node.args.value
+        : node.args?.expr
+          ? [node.args.expr]
+          : [];
+
+      // EXISTS subquery operator is represented as a function node in node-sql-parser
+      if (funcName === "exists") {
+        for (const arg of argValues) {
+          this.validateExpression(arg, state, activeCtes, nestingLevel);
+        }
+        return;
+      }
+
       if (!funcName || !ALLOWED_FUNCTIONS.has(funcName)) {
         throw new Error(
           `Function '${funcName || "unknown"}()' is not in the permitted SQLite function allowlist.`
@@ -923,12 +937,18 @@ export class SQLValidator {
       }
       state.functionsUsed.add(funcName);
 
+      if (
+        (funcName === "coalesce" ||
+          funcName === "ifnull" ||
+          funcName === "nullif") &&
+        argValues.length < 2
+      ) {
+        throw new Error(
+          `Function '${funcName}()' requires at least 2 arguments.`
+        );
+      }
+
       // Check argument count bound
-      const argValues = Array.isArray(node.args?.value)
-        ? node.args.value
-        : node.args?.expr
-          ? [node.args.expr]
-          : [];
       if (argValues.length > this.maxFunctionArgs) {
         throw new Error(
           `Function '${funcName}()' exceeds maximum argument count of ${this.maxFunctionArgs}.`

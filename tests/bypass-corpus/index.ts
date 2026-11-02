@@ -1,0 +1,326 @@
+import { UserRole } from "../../src/types.js";
+
+export interface BypassTestCase {
+  id: string;
+  category: string;
+  name: string;
+  sql: string;
+  role: UserRole;
+  expectedValid: false;
+  ruleThatStopsIt: string;
+}
+
+export const COMMENT_SMUGGLING_CASES: BypassTestCase[] = [
+  {
+    id: "BYPASS-COM-001",
+    category: "comment_smuggling",
+    name: "trailing double-dash comment",
+    sql: "SELECT id FROM customers -- WHERE 1=0",
+    role: "analyst",
+    expectedValid: false,
+    ruleThatStopsIt: "Lexical scanner blocks -- outside string literals",
+  },
+  {
+    id: "BYPASS-COM-002",
+    category: "comment_smuggling",
+    name: "inline C-style slash-star comment",
+    sql: "SELECT /*+ INLINE_HINT */ id FROM customers",
+    role: "analyst",
+    expectedValid: false,
+    ruleThatStopsIt: "Lexical scanner blocks /* outside string literals",
+  },
+  {
+    id: "BYPASS-COM-003",
+    category: "comment_smuggling",
+    name: "newline disguised double-dash comment",
+    sql: "SELECT id FROM customers\n-- injected payload\nWHERE id = 1",
+    role: "analyst",
+    expectedValid: false,
+    ruleThatStopsIt: "Lexical scanner blocks -- across all lines",
+  },
+  {
+    id: "BYPASS-COM-004",
+    category: "comment_smuggling",
+    name: "bracket quoted identifier followed by slash-star",
+    sql: "SELECT [name]/*comment*/ FROM customers",
+    role: "analyst",
+    expectedValid: false,
+    ruleThatStopsIt: "Lexical bracket scanner prevents comment smuggling after brackets",
+  },
+  {
+    id: "BYPASS-COM-005",
+    category: "comment_smuggling",
+    name: "backtick quoted identifier followed by double-dash",
+    sql: "SELECT `name` --comment\nFROM customers",
+    role: "analyst",
+    expectedValid: false,
+    ruleThatStopsIt: "Lexical backtick scanner detects subsequent --",
+  },
+];
+
+export const UNICODE_CONTROL_CASES: BypassTestCase[] = [
+  {
+    id: "BYPASS-UNI-001",
+    category: "unicode_control",
+    name: "embedded null byte string smuggling",
+    sql: "SELECT id FROM customers\u0000WHERE 1=1",
+    role: "analyst",
+    expectedValid: false,
+    ruleThatStopsIt: "Disallowed control characters regex rejects null byte \\u0000",
+  },
+  {
+    id: "BYPASS-UNI-002",
+    category: "unicode_control",
+    name: "right-to-left override character in table name",
+    sql: "SELECT id FROM \u202Ecustom\u202Ders",
+    role: "analyst",
+    expectedValid: false,
+    ruleThatStopsIt: "Disallowed Unicode control regex rejects bidirectional overrides",
+  },
+  {
+    id: "BYPASS-UNI-003",
+    category: "unicode_control",
+    name: "zero-width no-break space (BOM) smuggling",
+    sql: "\uFEFFSELECT id FROM customers",
+    role: "analyst",
+    expectedValid: false,
+    ruleThatStopsIt: "Disallowed control characters regex rejects BOM \\uFEFF",
+  },
+  {
+    id: "BYPASS-UNI-004",
+    category: "unicode_control",
+    name: "vertical tab whitespace variant",
+    sql: "SELECT\u000Bid\u000BFROM\u000Bcustomers",
+    role: "analyst",
+    expectedValid: false,
+    ruleThatStopsIt: "Disallowed control characters regex rejects vertical tab \\u000B",
+  },
+];
+
+export const QUOTING_AND_CASING_CASES: BypassTestCase[] = [
+  {
+    id: "BYPASS-QTC-001",
+    category: "quoting_and_casing",
+    name: "bracket-quoted forbidden system table [sqlite_master]",
+    sql: "SELECT sql FROM [sqlite_master]",
+    role: "admin",
+    expectedValid: false,
+    ruleThatStopsIt: "System catalog table allowlist check rejects [sqlite_master]",
+  },
+  {
+    id: "BYPASS-QTC-002",
+    category: "quoting_and_casing",
+    name: "double-quoted admin table \"api_keys\" requested by analyst",
+    sql: "SELECT id FROM \"api_keys\"",
+    role: "analyst",
+    expectedValid: false,
+    ruleThatStopsIt: "Role table allowlist check normalizes case and quotes",
+  },
+  {
+    id: "BYPASS-QTC-003",
+    category: "quoting_and_casing",
+    name: "mixed-case PII column BiLLiNg_EmAiL in SELECT",
+    sql: "SELECT BiLLiNg_EmAiL FROM customers",
+    role: "analyst",
+    expectedValid: false,
+    ruleThatStopsIt: "Case-insensitive PII column filter rejects BiLLiNg_EmAiL",
+  },
+  {
+    id: "BYPASS-QTC-004",
+    category: "quoting_and_casing",
+    name: "backtick-quoted PII column `stripe_customer_id`",
+    sql: "SELECT `stripe_customer_id` FROM customers",
+    role: "analyst",
+    expectedValid: false,
+    ruleThatStopsIt: "Normalized column check rejects quoted `stripe_customer_id`",
+  },
+  {
+    id: "BYPASS-QTC-005",
+    category: "quoting_and_casing",
+    name: "bracket-quoted PII column [billing_email]",
+    sql: "SELECT [billing_email] FROM customers",
+    role: "analyst",
+    expectedValid: false,
+    ruleThatStopsIt: "Normalized column check rejects quoted [billing_email]",
+  },
+];
+
+export const FUNCTION_AND_IO_CASES: BypassTestCase[] = [
+  {
+    id: "BYPASS-FIO-001",
+    category: "function_and_io",
+    name: "load_extension function call",
+    sql: "SELECT load_extension('sec.so') FROM customers",
+    role: "admin",
+    expectedValid: false,
+    ruleThatStopsIt: "Function allowlist rejects load_extension",
+  },
+  {
+    id: "BYPASS-FIO-002",
+    category: "function_and_io",
+    name: "mixed case LoAd_ExTeNsIoN function call",
+    sql: "SELECT LoAd_ExTeNsIoN('sec.so') FROM customers",
+    role: "admin",
+    expectedValid: false,
+    ruleThatStopsIt: "Function allowlist normalizes case and rejects LoAd_ExTeNsIoN",
+  },
+  {
+    id: "BYPASS-FIO-003",
+    category: "function_and_io",
+    name: "printf string formatting function",
+    sql: "SELECT printf('%s', name) FROM customers",
+    role: "analyst",
+    expectedValid: false,
+    ruleThatStopsIt: "Function allowlist rejects non-allowlisted printf",
+  },
+  {
+    id: "BYPASS-FIO-004",
+    category: "function_and_io",
+    name: "zeroblob allocation function",
+    sql: "SELECT zeroblob(10000000) FROM customers",
+    role: "analyst",
+    expectedValid: false,
+    ruleThatStopsIt: "Function allowlist rejects non-allowlisted zeroblob",
+  },
+  {
+    id: "BYPASS-FIO-005",
+    category: "function_and_io",
+    name: "sqlite_version internal probe",
+    sql: "SELECT sqlite_version() FROM customers",
+    role: "analyst",
+    expectedValid: false,
+    ruleThatStopsIt: "Function allowlist rejects non-allowlisted sqlite_version",
+  },
+  {
+    id: "BYPASS-FIO-006",
+    category: "function_and_io",
+    name: "custom unallowlisted UDF execution",
+    sql: "SELECT dangerous_eval('1+1') FROM customers",
+    role: "admin",
+    expectedValid: false,
+    ruleThatStopsIt: "Strict allowlist rejects all unknown function identifiers",
+  },
+];
+
+export const CTE_AND_MUTATION_CASES: BypassTestCase[] = [
+  {
+    id: "BYPASS-CTE-001",
+    category: "cte_and_mutations",
+    name: "WITH clause containing INSERT mutation",
+    sql: "WITH mutated AS (INSERT INTO customers VALUES (88, 'A', 'a@b.com', 'cus_1', 'pro', 'now')) SELECT 1",
+    role: "admin",
+    expectedValid: false,
+    ruleThatStopsIt: "AST validator enforces SELECT-only query inside CTE bodies",
+  },
+  {
+    id: "BYPASS-CTE-002",
+    category: "cte_and_mutations",
+    name: "WITH clause containing DELETE mutation",
+    sql: "WITH victim AS (DELETE FROM customers WHERE id = 1 RETURNING id) SELECT * FROM victim",
+    role: "admin",
+    expectedValid: false,
+    ruleThatStopsIt: "AST validator enforces SELECT-only query inside CTE bodies",
+  },
+  {
+    id: "BYPASS-CTE-003",
+    category: "cte_and_mutations",
+    name: "CTE shadowing catalog table name customers",
+    sql: "WITH customers AS (SELECT 1 AS id) SELECT id FROM customers",
+    role: "analyst",
+    expectedValid: false,
+    ruleThatStopsIt: "CTE validation forbids shadowing catalog table names",
+  },
+  {
+    id: "BYPASS-CTE-004",
+    category: "cte_and_mutations",
+    name: "nested subquery hiding non-allowlisted function",
+    sql: "SELECT id FROM (SELECT randomblob(16) AS rb, id FROM customers) sub",
+    role: "analyst",
+    expectedValid: false,
+    ruleThatStopsIt: "Recursive AST traversal checks function allowlist in derived tables",
+  },
+  {
+    id: "BYPASS-CTE-005",
+    category: "cte_and_mutations",
+    name: "EXCEPT compound branch reading admin-only table",
+    sql: "SELECT id FROM customers EXCEPT SELECT customer_id FROM api_keys",
+    role: "analyst",
+    expectedValid: false,
+    ruleThatStopsIt: "Compound _next chain traversal checks table authorization on all branches",
+  },
+];
+
+export const CARTESIAN_AND_TAUTOLOGY_CASES: BypassTestCase[] = [
+  {
+    id: "BYPASS-CRT-001",
+    category: "cartesian_and_tautology",
+    name: "explicit CROSS JOIN",
+    sql: "SELECT c.id FROM customers c CROSS JOIN api_usage u",
+    role: "analyst",
+    expectedValid: false,
+    ruleThatStopsIt: "CROSS JOIN keyword and AST check rejects Cartesian products",
+  },
+  {
+    id: "BYPASS-CRT-002",
+    category: "cartesian_and_tautology",
+    name: "implicit comma-separated join",
+    sql: "SELECT c.id FROM customers c, api_usage u",
+    role: "analyst",
+    expectedValid: false,
+    ruleThatStopsIt: "AST check rejects implicit comma-separated table joins",
+  },
+  {
+    id: "BYPASS-CRT-003",
+    category: "cartesian_and_tautology",
+    name: "tautological join condition ON 1=1",
+    sql: "SELECT c.id FROM customers c JOIN api_usage u ON 1 = 1",
+    role: "analyst",
+    expectedValid: false,
+    ruleThatStopsIt: "Tautological join check rejects constant integer comparison",
+  },
+  {
+    id: "BYPASS-CRT-004",
+    category: "cartesian_and_tautology",
+    name: "tautological join condition ON true",
+    sql: "SELECT c.id FROM customers c JOIN api_usage u ON true",
+    role: "analyst",
+    expectedValid: false,
+    ruleThatStopsIt: "Tautological join check rejects boolean literal conditions",
+  },
+  {
+    id: "BYPASS-CRT-005",
+    category: "cartesian_and_tautology",
+    name: "tautological join condition with OR branch (ON c.id = u.customer_id OR 1=1)",
+    sql: "SELECT c.id FROM customers c JOIN api_usage u ON c.id = u.customer_id OR 1 = 1",
+    role: "analyst",
+    expectedValid: false,
+    ruleThatStopsIt: "Recursive tautology check scans OR branches for tautologies",
+  },
+  {
+    id: "BYPASS-CRT-006",
+    category: "cartesian_and_tautology",
+    name: "tautological join condition self-comparison (ON c.id = c.id)",
+    sql: "SELECT c.id FROM customers c JOIN api_usage u ON c.id = c.id",
+    role: "analyst",
+    expectedValid: false,
+    ruleThatStopsIt: "Tautological join check rejects same-column self-comparison",
+  },
+  {
+    id: "BYPASS-CRT-007",
+    category: "cartesian_and_tautology",
+    name: "NATURAL JOIN without explicit ON clause",
+    sql: "SELECT c.id FROM customers c NATURAL JOIN api_usage u",
+    role: "analyst",
+    expectedValid: false,
+    ruleThatStopsIt: "NATURAL JOIN check requires explicit ON conditions",
+  },
+];
+
+export const ALL_BYPASS_CASES: BypassTestCase[] = [
+  ...COMMENT_SMUGGLING_CASES,
+  ...UNICODE_CONTROL_CASES,
+  ...QUOTING_AND_CASING_CASES,
+  ...FUNCTION_AND_IO_CASES,
+  ...CTE_AND_MUTATION_CASES,
+  ...CARTESIAN_AND_TAUTOLOGY_CASES,
+];

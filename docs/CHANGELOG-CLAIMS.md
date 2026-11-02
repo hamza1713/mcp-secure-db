@@ -57,3 +57,12 @@ Tracks every claim added, softened, removed, or newly supported across remediati
 
 ### Honest Caveats Added
 - Documented `node:sqlite` `ExperimentalWarning` and non-reentrant `setAuthorizer` design in `README.md` and `src/database/sqlite-worker-code.ts`.
+
+## Phase 3 — Evidence (Differential Testing, Fuzzing, Bypass Corpus, Benchmark, Red-Team)
+
+### Newly Supported Claims (`docs/CLAIMS.md`)
+- `CLAIM-022` (`SUPPORTED`) [E:CLAIM-022]: Measured validator latency via reproducible benchmark suite in `bench/validator.bench.ts` (1,000 warmup iterations + 10,000 timed iterations per query on Node v24.12.0 x64); measured p50 of 0.334 ms (p95 1.102 ms, p99 3.344 ms) on simple projections and p50 of 0.395 ms (p95 1.030 ms, p99 1.904 ms) on joins (`bench/results.json`).
+- `CLAIM-039` (`SUPPORTED`) [E:CLAIM-039]: Public bypass corpus at `tests/bypass-corpus/` with 32 structured attack vectors verified in `tests/bypass-corpus.test.ts`.
+- `CLAIM-040` (`SUPPORTED`) [E:CLAIM-040]: Differential test harness in `tests/differential.test.ts` executing 93 queries across `SQLValidator` and real SQLite (`node:sqlite` with authorizer), proving zero security divergences.
+- `CLAIM-041` (`SUPPORTED`) [E:CLAIM-041]: Seeded deterministic PRNG grammar and mutation fuzzer in `tests/fuzz.test.ts` executing 300 queries, asserting that every validator-allowed query executes safely in real SQLite.
+- `CLAIM-042` (`SUPPORTED`) [E:CLAIM-042]: Dedicated self red-team pass in `tests/red-team-self.test.ts` evaluating 32 distinct adversarial attack vectors against all security layers, verifying all 32 fail closed.

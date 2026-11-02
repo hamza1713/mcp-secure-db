@@ -12,6 +12,7 @@
     "start": "mcp-use start",
     "claims:lint": "node --experimental-strip-types scripts/claims-lint.ts",
     "deps:verify": "node --experimental-strip-types scripts/verify-deps.ts",
+    "bench": "vitest run tests/benchmark.test.ts",
     "test:unit": "vitest run",
     "test": "vitest run && pnpm run claims:lint && pnpm run deps:verify",
     "typecheck": "tsc --noEmit"
