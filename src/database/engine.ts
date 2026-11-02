@@ -33,7 +33,7 @@ export class SecureDatabaseEngine {
     await this.init();
     if (!this.db) throw new Error("Database engine not initialized");
 
-    // Layer 2: Deterministic Zero-Token AST Validation
+    // Layer 2: Local JavaScript AST Validation
     const validation = sqlValidator.validate(rawQuery, role);
     if (!validation.valid) {
       auditLogger.log({
@@ -50,7 +50,7 @@ export class SecureDatabaseEngine {
     const startTime = performance.now();
 
     try {
-      // Execute query with timeout guard
+      // Execute query in in-process SQLite engine
       const results = this.db.exec(queryToExecute);
       const executionTimeMs = Math.round((performance.now() - startTime) * 100) / 100;
 

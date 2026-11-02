@@ -37,18 +37,19 @@ Executed command: `pnpm test` (`vitest run`) [E:CLAIM-014]
 | CLAIM-019 | Validator rejects Cartesian joins and tautological join conditions | `README.md`, `src/security/validator.ts` | TEST | `tests/validator.test.ts` | PARTIAL |
 | CLAIM-020 | Validator enforces table and column-level PII protection for non-admin roles (`billing_email`, `stripe_customer_id`, `webhook_secret`, `client_ip`) | `README.md`, `src/security/validator.ts` | TEST | `tests/validator.test.ts` | PARTIAL |
 | CLAIM-021 | `LIMIT` clamping prevents compute exhaustion, memory crashes, and cloud bill shock | `README.md`, `docs/` | NONE | `src/security/validator.ts` | PARTIAL |
-| CLAIM-022 | Pre-execution AST validation runs in under 1 millisecond | `README.md`, `docs/` | NONE | `NONE` | UNSUPPORTED |
-| CLAIM-023 | Validator performs deterministic AST C++ evaluation / runs at C++ AST speeds | `src/index.ts`, `docs/` | NONE | `NONE` | UNSUPPORTED |
-| CLAIM-024 | Database runs in an in-memory kernel sandbox / hardware isolation with hardware watchdog timeouts | `README.md`, `src/index.ts`, `docs/` | NONE | `NONE` | UNSUPPORTED |
-| CLAIM-025 | Engine enforces a 10-second hard execution timeout / watchdog | `README.md`, `src/database/engine.ts` | NONE | `src/database/engine.ts` | UNSUPPORTED |
-| CLAIM-026 | Engine enforces a 512MB memory boundary | `README.md`, `src/database/engine.ts` | NONE | `src/database/engine.ts` | UNSUPPORTED |
-| CLAIM-027 | Audit logger is a thread-safe ring buffer suitable for security auditing | `README.md`, `src/database/audit.ts` | TEST | `tests/engine.test.ts` | PARTIAL |
-| CLAIM-028 | System mitigates all four threat vectors (prompt injection DDL/DML, SSRF, DoS, PII exfiltration) | `README.md` | NONE | `NONE` | UNSUPPORTED |
-| CLAIM-029 | System provides mathematical, deterministic security guarantees | `docs/` | NONE | `NONE` | UNSUPPORTED |
-| CLAIM-030 | Repository and Dockerfile are compliant with Manufact Cloud (Dockpack) standards | `README.md`, `Dockerfile`, `docs/` | NONE | `NONE` | UNVERIFIED |
-| CLAIM-031 | Project is production ready / enterprise-grade | `docs/PROJECT_CONTEXT_REPORT.md`, `docs/COMPREHENSIVE_FOUNDER_REPORT.md` | NONE | `NONE` | UNSUPPORTED |
-| CLAIM-032 | System addresses GDPR, HIPAA, or SOC 2 compliance barriers | `docs/` | NONE | `NONE` | UNSUPPORTED |
-| CLAIM-033 | Enterprise CISOs are actively blocking AI database integrations | `docs/` | NONE | `NONE` | UNVERIFIED |
-| CLAIM-034 | Manufact founders are YC W24/S24 alumni | `docs/` | CITATION | `docs/mcp-secure-db-audit-and-remediation-report.md` | UNSUPPORTED |
-| CLAIM-035 | Upstream maintainer bot auto-closed a Python PR stating focus is on the TypeScript SDK | `docs/` | NONE | `NONE` | UNVERIFIED |
-| CLAIM-036 | Legacy Python/DuckDB claims (`server.py`, `sqlglot`, DuckDB `conn.interrupt()`, 96 pytest tests) describe the current repository | `docs/PROJECT_CONTEXT_REPORT.md`, `docs/COMPREHENSIVE_FOUNDER_REPORT.md` | NONE | `NONE` | UNSUPPORTED |
+| CLAIM-022 | Pre-execution AST validation runs in under 1 millisecond | `NONE (removed in Phase 1 pending Phase 3 benchmark)` | NONE | `NONE` | REMOVED |
+| CLAIM-023 | Validator performs deterministic AST C++ evaluation / runs at C++ AST speeds | `NONE (removed in Phase 1)` | NONE | `REMOVED` | REMOVED |
+| CLAIM-024 | Database runs in an in-memory kernel sandbox / hardware isolation with hardware watchdog timeouts | `NONE (removed in Phase 1)` | NONE | `REMOVED` | REMOVED |
+| CLAIM-025 | Engine enforces a 10-second hard execution timeout / watchdog | `src/database/engine.ts` | NONE | `src/database/engine.ts` | UNSUPPORTED |
+| CLAIM-026 | Engine enforces a 512MB memory boundary | `src/database/engine.ts` | NONE | `src/database/engine.ts` | UNSUPPORTED |
+| CLAIM-027 | Audit logger is an in-memory recent-events ring buffer (not durable across restarts) | `README.md`, `src/database/audit.ts` | TEST | `tests/engine.test.ts` | PARTIAL |
+| CLAIM-028 | System mitigates all four threat vectors (prompt injection DDL/DML, SSRF, DoS, PII exfiltration) | `NONE (removed in Phase 1)` | NONE | `REMOVED` | REMOVED |
+| CLAIM-029 | System provides mathematical, deterministic security guarantees | `NONE (removed in Phase 1)` | NONE | `REMOVED` | REMOVED |
+| CLAIM-030 | Repository and Dockerfile are compliant with Manufact Cloud (Dockpack) standards | `docs/OPEN_QUESTIONS.md` | NONE | `NONE` | UNVERIFIED |
+| CLAIM-031 | Project is production ready / enterprise-grade | `NONE (obsolete reports deleted in Phase 1)` | NONE | `REMOVED` | REMOVED |
+| CLAIM-032 | System addresses GDPR, HIPAA, or SOC 2 compliance barriers | `NONE (explicitly disclaimed in Limitations)` | NONE | `REMOVED` | REMOVED |
+| CLAIM-033 | Enterprise CISOs are actively blocking AI database integrations | `docs/OPEN_QUESTIONS.md` | NONE | `NONE` | UNVERIFIED |
+| CLAIM-034 | Manufact founders are YC W24/S24 alumni | `NONE (corrected by CLAIM-012)` | CITATION | `docs/mcp-secure-db-audit-and-remediation-report.md` | REMOVED |
+| CLAIM-035 | Upstream maintainer bot auto-closed a Python PR stating focus is on the TypeScript SDK | `docs/OPEN_QUESTIONS.md` | NONE | `NONE` | UNVERIFIED |
+| CLAIM-036 | Legacy Python/DuckDB claims (`server.py`, `sqlglot`, DuckDB `conn.interrupt()`, 96 pytest tests) describe the current repository | `NONE (obsolete reports deleted in Phase 1)` | NONE | `REMOVED` | REMOVED |
+| CLAIM-037 | Automated claims linter (`scripts/claims-lint.ts`) enforces evidence tags, checks ledger file paths, and rejects inflated, regulatory-certification, maturity, and local-path text in `pnpm test` and CI | `scripts/claims-lint.ts`, `.github/workflows/ci.yml` | TEST | `tests/claims-lint.test.ts` | SUPPORTED |

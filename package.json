@@ -1,7 +1,7 @@
 {
   "name": "mcp-secure-db",
   "version": "1.0.0",
-  "description": "Zero-Token Deterministic Secure Analytical Database Sandbox MCP Server",
+  "description": "Reference MCP server demonstrating layered SQL query guardrails and sandboxed SQLite execution",
   "type": "module",
   "engines": {
     "node": ">=22.0.0"
@@ -10,7 +10,9 @@
     "dev": "mcp-use dev",
     "build": "mcp-use build",
     "start": "mcp-use start",
-    "test": "vitest run",
+    "claims:lint": "node --experimental-strip-types scripts/claims-lint.ts",
+    "test:unit": "vitest run",
+    "test": "vitest run && pnpm run claims:lint",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

@@ -1,5 +1,5 @@
 # Multi-stage Dockerfile for TypeScript MCP Server
-# Fully compliant with Manufact Cloud (Dockpack) runtime standards
+# Builds with Node 22 and runs as non-root user appuser (UID 1001)
 
 FROM node:22-slim AS builder
 WORKDIR /app

@@ -10,7 +10,7 @@ const server = new MCPServer({
   name: "mcp-secure-db",
   version: "1.0.0",
   description:
-    "Zero-Token Deterministic Secure Analytical Database Sandbox MCP Server",
+    "Reference MCP server demonstrating layered SQL validation and in-process SQLite execution",
 });
 
 /**
@@ -128,7 +128,7 @@ export async function handleVerifyQuerySafety(
             columnsAccessed: validation.columnsAccessed,
             limitApplied: validation.limitInjected,
             violationReason: validation.violationReason ?? null,
-            cost: "0 Tokens (Deterministic AST C++ Evaluation)",
+            cost: "0 Tokens (Local JavaScript AST Validation)",
           },
           null,
           2
@@ -306,7 +306,7 @@ export const executeAnalyticalSql = server.tool(
   {
     name: "execute_analytical_sql",
     description:
-      "Execute bounded, non-mutating analytical SQL queries in the sandboxed database kernel. (Requires 'analyst' or 'admin' role).",
+      "Execute bounded, non-mutating analytical SQL queries in the in-process SQLite sandbox. (Requires 'analyst' or 'admin' role).",
     inputSchema: z.object({
       query: z.string().describe("Analytical SELECT query to execute"),
       token: z.string().optional().describe("Optional authentication token"),
@@ -369,10 +369,10 @@ server.resource(
         mimeType: "text/markdown",
         text: `# mcp-secure-db Security Policy Specification
 
-1. **Layer 1: RBAC Middleware** - Token resolution, tool masking, and execution authorization.
-2. **Layer 2: Zero-Token AST Validator** - Blocks comments, multiple statements, mutating DDL/DML, Cartesian joins, SSRF file functions, and PII columns.
-3. **Layer 3: In-Memory Kernel Sandbox** - Isolated in-memory engine with zero external network or filesystem access and hardware watchdog timeouts.
-4. **Layer 4: Telemetry Ring Buffer** - Real-time audit recording of all queries, blocks, and violations.`,
+1. **Layer 1: Role-Based Authorization** - Token resolution and tool-level access checks.
+2. **Layer 2: Local JavaScript AST Validator** - Rejects SQL comments, chained statements, non-SELECT statements, basic Cartesian joins, and direct references to sensitive columns without calling an LLM.
+3. **Layer 3: In-Process WebAssembly SQLite Sandbox** - Seeded in-memory SQLite instance with no external network or filesystem handles.
+4. **Layer 4: In-Memory Recent-Events Buffer** - Non-durable ring buffer recording recent query executions and blocks.`,
       },
     ],
   })
