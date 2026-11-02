@@ -1,32 +1,34 @@
-FROM mirror.gcr.io/library/python:3.12-slim AS build
-RUN pip install --no-cache-dir uv
+# Multi-stage Dockerfile for TypeScript MCP Server
+# Fully compliant with Manufact Cloud (Dockpack) runtime standards
+
+FROM node:22-slim AS builder
 WORKDIR /app
-RUN python -m venv /app/.venv
-ENV PATH="/app/.venv/bin:$PATH"
-ENV PYTHONDONTWRITEBYTECODE=1
-ENV PYTHONUNBUFFERED=1
 
-# Install dependencies with uv for fast Dockpack / Manufact Cloud builds
-COPY requirements.txt ./
-RUN --mount=type=cache,target=/root/.cache/uv uv pip install --no-cache-dir -r requirements.txt
+RUN corepack enable pnpm
 
-# Copy application source
-COPY . .
+COPY package.json pnpm-lock.yaml* ./
+RUN pnpm install
 
-FROM mirror.gcr.io/library/python:3.12-slim AS runtime
-ENV PATH="/app/.venv/bin:$PATH"
-ENV PYTHONDONTWRITEBYTECODE=1
-ENV PYTHONUNBUFFERED=1
-ENV HOST="0.0.0.0"
-ENV PORT="8000"
+COPY tsconfig.json ./
+COPY src ./src
 
-RUN groupadd -g 1001 appgroup && \
-    useradd -u 1001 -g appgroup -m -d /app -s /usr/sbin/nologin appuser
+RUN pnpm run build
+
+FROM node:22-slim AS runner
 WORKDIR /app
-COPY --from=build --chown=appuser:appgroup /app /app
 
-EXPOSE 8000
+ENV NODE_ENV=production
+ENV PORT=8000
+ENV HOST=0.0.0.0
+
+RUN addgroup --system --gid 1001 appgroup && \
+    adduser --system --uid 1001 --ingroup appgroup appuser
+
+COPY --from=builder /app/package.json ./package.json
+COPY --from=builder /app/node_modules ./node_modules
+COPY --from=builder /app/.mcp-use ./.mcp-use
 
 USER appuser
+EXPOSE 8000
 
-CMD ["python", "server.py"]
+CMD ["node", ".mcp-use/build/index.js"]
