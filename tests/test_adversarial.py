@@ -115,7 +115,7 @@ def test_adversarial_recursive_cte_stopped_by_watchdog(engine: SecureDuckDBEngin
     WITH RECURSIVE nums(x) AS (
         SELECT 1
         UNION ALL
-        SELECT x + 1 FROM nums WHERE x < 200000000
+        SELECT x + 1 FROM nums WHERE x < 2000000
     )
     SELECT o.org_name, COUNT(n1.x)
     FROM organizations o

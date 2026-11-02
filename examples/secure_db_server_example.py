@@ -795,7 +795,14 @@ class SecureDBExampleServer(MCPServer):
         super().__init__(*args, **kwargs)
 
     def streamable_http_app(self) -> Any:
+        from starlette.responses import RedirectResponse
+
         app = super().streamable_http_app()
+
+        async def _root_redirect(_request: Any) -> Any:
+            return RedirectResponse(url="/inspector", status_code=307)
+
+        app.add_route("/", _root_redirect, methods=["GET"])
         app.add_middleware(
             HybridHTTPAuthMiddleware,
             auth_provider=self._hybrid_auth_provider,

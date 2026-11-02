@@ -90,8 +90,14 @@ class SecureDBMCPServer(MCPServer):
 
     def streamable_http_app(self):
         from mcp.server.fastmcp import FastMCP
+        from starlette.responses import RedirectResponse
 
         app = FastMCP.streamable_http_app(self)
+
+        async def _root_redirect(_request):
+            return RedirectResponse(url="/inspector", status_code=307)
+
+        app.add_route("/", _root_redirect, methods=["GET"])
         app.add_middleware(
             MCPLoggingMiddleware,
             debug_level=self.debug_level,

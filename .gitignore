@@ -22,3 +22,8 @@ build/
 .vscode/
 .idea/
 *.swp
+
+# Recordings & media (add later)
+recordings/
+generate_recordings.py
+
