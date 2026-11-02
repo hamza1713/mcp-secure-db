@@ -1,20 +1,20 @@
 # Multi-stage Dockerfile for TypeScript MCP Server
-# Builds with Node 22 and runs as non-root user appuser (UID 1001)
+# Builds with Node 24 (includes node:sqlite authorizer support) and runs as non-root appuser (UID 1001)
 
-FROM node:22-slim AS builder
+FROM node:24-slim AS builder
 WORKDIR /app
 
 RUN corepack enable pnpm
 
-COPY package.json pnpm-lock.yaml* ./
-RUN pnpm install
+COPY package.json pnpm-lock.yaml ./
+RUN pnpm install --frozen-lockfile
 
 COPY tsconfig.json ./
 COPY src ./src
 
 RUN pnpm run build
 
-FROM node:22-slim AS runner
+FROM node:24-slim AS runner
 WORKDIR /app
 
 ENV NODE_ENV=production

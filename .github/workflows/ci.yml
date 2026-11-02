@@ -17,19 +17,25 @@ jobs:
         with:
           version: 10
 
-      - name: Setup Node.js
+      - name: Setup Node.js 24 (required for node:sqlite setAuthorizer and enableDefensive)
         uses: actions/setup-node@v4
         with:
-          node-version: "22"
+          node-version: "24"
           cache: "pnpm"
 
       - name: Install dependencies (frozen lockfile)
         run: pnpm install --frozen-lockfile
 
+      - name: Verify exact dependency pinning and lockfile integrity
+        run: pnpm run deps:verify
+
+      - name: Run npm registry advisory audit
+        run: pnpm audit --audit-level=high
+
       - name: TypeScript typecheck
         run: pnpm run typecheck
 
-      - name: Run unit tests and claims-lint
+      - name: Run unit tests, claims-lint, and dependency verification
         run: pnpm test
 
       - name: Build MCP server bundle

@@ -5,28 +5,140 @@ import { dbEngine } from "./database/engine.js";
 import { sqlValidator } from "./security/validator.js";
 import { auditLogger } from "./database/audit.js";
 import { TABLE_METADATA } from "./database/seed.js";
+import { SecurityContext, UserRole } from "./types.js";
 
 const server = new MCPServer({
   name: "mcp-secure-db",
   version: "1.0.0",
   description:
-    "Reference MCP server demonstrating layered SQL validation and in-process SQLite execution",
+    "Reference MCP server demonstrating layered SQL validation and worker-isolated SQLite execution",
 });
 
 /**
- * Helper to resolve security context from request context or explicit token parameter
+ * Resolves caller security context from:
+ * 1. Verified `mcp-use` OAuth context (`ctx.auth`), when configured
+ * 2. Explicit tool `token` argument or HTTP `Authorization` / `x-api-key` headers
+ * 3. Default-deny (`unauthenticated`) unless `MCP_SECURE_DB_INSECURE_DEMO=true`
  */
-export function resolveAuthContext(explicitToken?: string | null, ctx?: any) {
+export function resolveAuthContext(
+  explicitToken?: string | null,
+  ctx?: any
+): SecurityContext {
   let token = explicitToken;
-  if (!token && ctx?.request) {
+  const req = ctx?.request ?? ctx?.req;
+  if (!token && req) {
     const authHeader =
-      ctx.request.header?.("authorization") ||
-      ctx.request.header?.("x-api-key") ||
-      ctx.request.headers?.get?.("authorization");
+      req.header?.("authorization") ||
+      req.header?.("x-api-key") ||
+      req.raw?.headers?.get?.("authorization") ||
+      req.raw?.headers?.get?.("x-api-key") ||
+      req.headers?.get?.("authorization") ||
+      req.headers?.get?.("x-api-key");
     if (authHeader) token = authHeader;
   }
-  return rbacManager.resolveContext(token);
+
+  // Also map @modelcontextprotocol/server AuthInfo on middleware ctx.auth if present
+  const oauth = ctx?.auth
+    ? {
+        clientId: ctx.auth.clientId,
+        scopes: ctx.auth.scopes,
+        permissions: ctx.auth.permissions,
+        user: ctx.auth.user,
+        payload: ctx.auth.payload ?? ctx.auth.extra,
+      }
+    : null;
+
+  return rbacManager.resolveContext(token, { oauth });
 }
+
+function buildFilteredCatalog(role: UserRole) {
+  return Object.fromEntries(
+    Object.entries(TABLE_METADATA)
+      .filter(([, meta]) => role === "admin" || !meta.adminOnly)
+      .map(([name, meta]) => [
+        name,
+        {
+          name: meta.name,
+          description: meta.description,
+          rowCount: meta.rowCount,
+          columns: meta.columns
+            .filter((col) => role === "admin" || !col.isPII)
+            .map((col) => ({
+              name: col.name,
+              type: col.type,
+              isPII: col.isPII,
+              description: col.description,
+            })),
+          redactedPiiColumnCount:
+            role === "admin"
+              ? 0
+              : meta.columns.filter((col) => col.isPII).length,
+        },
+      ])
+  );
+}
+
+function denyToolCall(
+  secCtx: SecurityContext,
+  toolName: string,
+  requiredRoleLabel: string,
+  recordedInput: string
+) {
+  const isUnauth = secCtx.role === "unauthenticated";
+  auditLogger.log({
+    principal: secCtx.principal,
+    role: secCtx.role,
+    tool: toolName,
+    query: recordedInput,
+    status: isUnauth ? "BLOCKED_AUTH" : "BLOCKED_RBAC",
+    reason: isUnauth
+      ? secCtx.denialReason ||
+        `Unauthenticated access to '${toolName}' denied by default-deny policy.`
+      : `Role '${secCtx.role}' lacks permission for '${toolName}'.`,
+  });
+
+  const prefix = isUnauth ? "AuthenticationRequired" : "RBACPermissionDenied";
+  return {
+    isError: true,
+    content: [
+      {
+        type: "text" as const,
+        text: `${prefix}: Role '${secCtx.role}' is not authorized to invoke '${toolName}'. Minimum role required: '${requiredRoleLabel}'.`,
+      },
+    ],
+  };
+}
+
+// ==========================================
+// MCP PROTOCOL MIDDLEWARE (Layer 1)
+// ==========================================
+
+server.use("mcp:tools/list", async (ctx, next) => {
+  const secCtx = resolveAuthContext(undefined, ctx);
+  const allTools = await next();
+  return rbacManager.filterTools(secCtx.role, allTools);
+});
+
+server.use("mcp:tools/call", async (ctx, next) => {
+  const toolName = ctx.params.name;
+  const argToken =
+    typeof ctx.params.arguments?.token === "string"
+      ? ctx.params.arguments.token
+      : undefined;
+  const secCtx = resolveAuthContext(argToken, ctx);
+
+  if (!rbacManager.canAccessTool(secCtx.role, toolName)) {
+    const minRole =
+      toolName === "get_security_audit_log"
+        ? "admin"
+        : toolName === "execute_analytical_sql"
+          ? "analyst"
+          : "public_viewer";
+    return denyToolCall(secCtx, toolName, minRole, `CALL ${toolName}`);
+  }
+
+  return next();
+});
 
 // ==========================================
 // TOOL HANDLERS
@@ -45,10 +157,14 @@ export async function handleWhoami(
           {
             principal: secCtx.principal,
             role: secCtx.role,
+            authenticated: secCtx.authenticated,
+            authSource: secCtx.authSource,
             scopes: secCtx.scopes,
             allowedTools: secCtx.allowedTools,
             notice:
-              "Role determines dynamic tool visibility and column-level PII masking.",
+              secCtx.role === "unauthenticated"
+                ? "Default-deny active: supply valid OAuth or Bearer credentials to access database metadata or query tools."
+                : "Role determines dynamic tool visibility, table allowlists, and PII enforcement.",
           },
           null,
           2
@@ -63,6 +179,10 @@ export async function handleListTables(
   ctx?: any
 ) {
   const secCtx = resolveAuthContext(token, ctx);
+  if (!rbacManager.canAccessTool(secCtx.role, "list_tables")) {
+    return denyToolCall(secCtx, "list_tables", "public_viewer", "CALL list_tables");
+  }
+
   const tables = dbEngine.getTables(secCtx.role);
   return {
     content: [
@@ -87,6 +207,15 @@ export async function handleDescribeTable(
   ctx?: any
 ) {
   const secCtx = resolveAuthContext(token, ctx);
+  if (!rbacManager.canAccessTool(secCtx.role, "describe_table")) {
+    return denyToolCall(
+      secCtx,
+      "describe_table",
+      "public_viewer",
+      `CALL describe_table(${table_name})`
+    );
+  }
+
   const schema = dbEngine.getTableSchema(table_name, secCtx.role);
   if (!schema) {
     return {
@@ -114,6 +243,15 @@ export async function handleVerifyQuerySafety(
   ctx?: any
 ) {
   const secCtx = resolveAuthContext(token, ctx);
+  if (!rbacManager.canAccessTool(secCtx.role, "verify_query_safety")) {
+    return denyToolCall(
+      secCtx,
+      "verify_query_safety",
+      "public_viewer",
+      query
+    );
+  }
+
   const validation = sqlValidator.validate(query, secCtx.role);
   return {
     content: [
@@ -126,6 +264,7 @@ export async function handleVerifyQuerySafety(
             sanitizedQuery: validation.sanitizedQuery,
             tablesAccessed: validation.tablesAccessed,
             columnsAccessed: validation.columnsAccessed,
+            functionsUsed: validation.functionsUsed ?? [],
             limitApplied: validation.limitInjected,
             violationReason: validation.violationReason ?? null,
             cost: "0 Tokens (Local JavaScript AST Validation)",
@@ -144,24 +283,8 @@ export async function handleExecuteAnalyticalSql(
 ) {
   const secCtx = resolveAuthContext(token, ctx);
 
-  // Hard RBAC enforcement
   if (!rbacManager.canAccessTool(secCtx.role, "execute_analytical_sql")) {
-    auditLogger.log({
-      principal: secCtx.principal,
-      role: secCtx.role,
-      query,
-      status: "BLOCKED_RBAC",
-      reason: `Role '${secCtx.role}' lacks permission for 'execute_analytical_sql'.`,
-    });
-    return {
-      isError: true,
-      content: [
-        {
-          type: "text" as const,
-          text: `RBACPermissionDenied: Role '${secCtx.role}' is not authorized to execute analytical queries. Minimum role required: 'analyst'.`,
-        },
-      ],
-    };
+    return denyToolCall(secCtx, "execute_analytical_sql", "analyst", query);
   }
 
   try {
@@ -198,22 +321,12 @@ export async function handleGetSecurityAuditLog(
   const secCtx = resolveAuthContext(token, ctx);
 
   if (!rbacManager.canAccessTool(secCtx.role, "get_security_audit_log")) {
-    auditLogger.log({
-      principal: secCtx.principal,
-      role: secCtx.role,
-      query: "CALL get_security_audit_log",
-      status: "BLOCKED_RBAC",
-      reason: `Role '${secCtx.role}' is not authorized to inspect security audit logs.`,
-    });
-    return {
-      isError: true,
-      content: [
-        {
-          type: "text" as const,
-          text: `RBACPermissionDenied: Role '${secCtx.role}' is not authorized to view security audit telemetry. Minimum role required: 'admin'.`,
-        },
-      ],
-    };
+    return denyToolCall(
+      secCtx,
+      "get_security_audit_log",
+      "admin",
+      "CALL get_security_audit_log"
+    );
   }
 
   const entries = auditLogger.getEntries(limit);
@@ -225,6 +338,8 @@ export async function handleGetSecurityAuditLog(
         type: "text" as const,
         text: JSON.stringify(
           {
+            durabilityNotice:
+              "In-memory recent-events buffer (not durable across restarts).",
             stats,
             returnedEntries: entries.length,
             entries,
@@ -232,6 +347,36 @@ export async function handleGetSecurityAuditLog(
           null,
           2
         ),
+      },
+    ],
+  };
+}
+
+export async function handleReadCatalogResource(uri: URL, ctx?: any) {
+  const secCtx = resolveAuthContext(undefined, ctx);
+  if (!rbacManager.canReadCatalog(secCtx.role)) {
+    auditLogger.log({
+      principal: secCtx.principal,
+      role: secCtx.role,
+      tool: "resource:schema://catalog",
+      query: "READ schema://catalog",
+      status: "BLOCKED_AUTH",
+      reason:
+        secCtx.denialReason ||
+        "Unauthenticated read of schema://catalog denied by default-deny policy.",
+    });
+    throw new Error(
+      "AuthenticationRequired: valid credentials are required to read schema://catalog."
+    );
+  }
+
+  const filteredCatalog = buildFilteredCatalog(secCtx.role);
+  return {
+    contents: [
+      {
+        uri: uri.href,
+        mimeType: "application/json",
+        text: JSON.stringify(filteredCatalog, null, 2),
       },
     ],
   };
@@ -260,7 +405,7 @@ export const listTables = server.tool(
   {
     name: "list_tables",
     description:
-      "List accessible analytical database tables with row counts and visible column names.",
+      "List accessible analytical database tables with row counts and visible column names. (Requires authenticated role).",
     inputSchema: z.object({
       token: z
         .string()
@@ -275,7 +420,7 @@ export const describeTable = server.tool(
   {
     name: "describe_table",
     description:
-      "Inspect schema details, column types, descriptions, and PII protection flags for a specific table.",
+      "Inspect schema details, column types, descriptions, and PII protection flags for an authorized table. (Requires authenticated role).",
     inputSchema: z.object({
       table_name: z.string().describe("Target table name to inspect"),
       token: z.string().optional().describe("Optional authentication token"),
@@ -288,11 +433,11 @@ export const verifyQuerySafety = server.tool(
   {
     name: "verify_query_safety",
     description:
-      "Dry-run deterministic AST validation of an analytical SQL query without executing it.",
+      "Dry-run local JavaScript AST validation of an analytical SQL query without executing it. (Requires authenticated role).",
     inputSchema: z.object({
       query: z
         .string()
-        .describe("SQL query to validate against the 4-layer security policy"),
+        .describe("SQL query to validate against allowlist and role policy"),
       token: z
         .string()
         .optional()
@@ -306,7 +451,7 @@ export const executeAnalyticalSql = server.tool(
   {
     name: "execute_analytical_sql",
     description:
-      "Execute bounded, non-mutating analytical SQL queries in the in-process SQLite sandbox. (Requires 'analyst' or 'admin' role).",
+      "Execute bounded, non-mutating analytical SQL queries in the worker-isolated SQLite sandbox. (Requires 'analyst' or 'admin' role).",
     inputSchema: z.object({
       query: z.string().describe("Analytical SELECT query to execute"),
       token: z.string().optional().describe("Optional authentication token"),
@@ -319,7 +464,7 @@ export const getSecurityAuditLog = server.tool(
   {
     name: "get_security_audit_log",
     description:
-      "Inspect execution telemetry, security blocks, AST violations, and sandbox statistics. (Requires 'admin' role).",
+      "Inspect in-memory recent-events audit telemetry and policy block statistics. (Requires 'admin' role).",
     inputSchema: z.object({
       limit: z
         .number()
@@ -342,25 +487,16 @@ server.resource(
     name: "catalog",
     uri: "schema://catalog",
     description:
-      "JSON catalog of all warehouse tables and column security definitions",
+      "Role-filtered JSON catalog of authorized warehouse tables and non-PII columns",
   },
-  async (uri) => ({
-    contents: [
-      {
-        uri: uri.href,
-        mimeType: "application/json",
-        text: JSON.stringify(TABLE_METADATA, null, 2),
-      },
-    ],
-  })
+  handleReadCatalogResource
 );
 
 server.resource(
   {
     name: "security-rules",
     uri: "policy://security-rules",
-    description:
-      "Deterministic 4-Layer Defense-in-Depth Security Specification",
+    description: "Layered SQL Validation and Worker-Isolated SQLite Policy",
   },
   async (uri) => ({
     contents: [
@@ -369,10 +505,10 @@ server.resource(
         mimeType: "text/markdown",
         text: `# mcp-secure-db Security Policy Specification
 
-1. **Layer 1: Role-Based Authorization** - Token resolution and tool-level access checks.
-2. **Layer 2: Local JavaScript AST Validator** - Rejects SQL comments, chained statements, non-SELECT statements, basic Cartesian joins, and direct references to sensitive columns without calling an LLM.
-3. **Layer 3: In-Process WebAssembly SQLite Sandbox** - Seeded in-memory SQLite instance with no external network or filesystem handles.
-4. **Layer 4: In-Memory Recent-Events Buffer** - Non-durable ring buffer recording recent query executions and blocks.`,
+1. **Layer 1: Default-Deny RBAC Middleware** - Rejects unauthenticated data access by default, filters tool visibility on \`tools/list\`, and enforces role authorization on \`tools/call\` and \`schema://catalog\`.
+2. **Layer 2: Local JavaScript AST Validator** - Enforces SELECT-only queries, explicit function and table allowlists, recursive CTE/subquery/compound traversal, join constraints, and row caps without calling an LLM.
+3. **Layer 3: Worker-Isolated SQLite Sandbox (\`node:sqlite\`)** - Runs inside a dedicated \`node:worker_threads\` worker with V8 heap limits, hard timeout termination, defensive mode, disabled extension loading, \`query_only\` pragma, and a compile-time \`setAuthorizer\` callback.
+4. **Layer 4: Fail-Closed Result Policy and Audit Buffer** - Scans returned columns and values for restricted PII patterns before returning rows, and logs decisions to an in-memory recent-events buffer.`,
       },
     ],
   })
@@ -396,12 +532,12 @@ server.prompt(
         role: "user",
         content: {
           type: "text",
-          text: `You are a Principal Data Analyst with access to mcp-secure-db.
+          text: `You are a Data Analyst with authenticated access to mcp-secure-db.
 Analyze current platform metrics with focus on '${focus}'.
 1. Inspect available tables using list_tables.
 2. Use verify_query_safety before running analytical aggregations.
-3. Formulate bounded analytical queries joining customers and api_usage.
-4. Summarize top enterprise accounts and compute consumption trends.`,
+3. Formulate bounded analytical queries joining customers and api_usage on explicit foreign keys.
+4. Summarize account tiers and compute consumption trends.`,
         },
       },
     ],
@@ -412,7 +548,7 @@ server.prompt(
   {
     name: "red_team_security_audit",
     description:
-      "Adversarial penetration testing harness to verify defense-in-depth boundaries",
+      "Adversarial testing prompt to verify layered query guardrails",
     schema: z.object({
       target_attack: z
         .enum([
@@ -430,13 +566,13 @@ server.prompt(
         role: "user",
         content: {
           type: "text",
-          text: `You are a Red Team Security Researcher testing mcp-secure-db defenses against: ${target_attack}.
-Attempt to verify that the 4-layer defense deterministically blocks the attack vector:
+          text: `You are a Security Researcher testing mcp-secure-db guardrails against: ${target_attack}.
+Verify how the layered controls respond to the test vector:
 - If mutation_injection: test DROP TABLE or UPDATE.
 - If comment_smuggling: test payloads with '--' or '/*'.
-- If cartesian_join: test unconstrained CROSS JOIN or 'ON 1=1'.
-- If pii_exfiltration: test SELECT billing_email or SELECT * under public_viewer role.
-Verify that 0 tokens are spent on LLM guards and that violations are recorded in the security audit log.`,
+- If cartesian_join: test unconstrained CROSS JOIN, implicit comma join, or 'ON 1=1'.
+- If pii_exfiltration: test aliases, CTEs, subqueries, expressions, or SELECT * on sensitive tables under analyst role.
+Verify that blocked attempts are recorded in the audit log.`,
         },
       },
     ],

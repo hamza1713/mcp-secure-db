@@ -41,3 +41,19 @@ Tracks every claim added, softened, removed, or newly supported across remediati
 
 ### Still Open (Queued for Phase 2–4)
 - `CLAIM-015` through `CLAIM-021`, `CLAIM-025`, `CLAIM-026`, `CLAIM-027` (`FINDING-001`..`FINDING-004`, `FINDING-006`..`FINDING-014`).
+
+## Phase 2 — P0 Engineering Fixes (Making Core Claims True)
+
+### Newly Supported Claims (`docs/CLAIMS.md`)
+- `CLAIM-015` (`SUPPORTED`): Registered `server.use("mcp:tools/list", ...)` and `server.use("mcp:tools/call", ...)` on `MCPServer`; verified over JSON-RPC wire calls in `tests/server.test.ts` (`FINDING-001` fixed).
+- `CLAIM-016` (`SUPPORTED`): Enforced default-deny authentication and role-based table/PII filtering on `schema://catalog` (`FINDING-002` fixed).
+- `CLAIM-017` (`SUPPORTED`): Switched `RBACManager` to default-deny (`unauthenticated` role receives only `whoami`), added verified `mcp-use` OAuth scope resolution (`CLAIM-013`), and documented `MCP_SECURE_DB_INSECURE_DEMO=true` as insecure (`FINDING-013` fixed).
+- `CLAIM-018` (`SUPPORTED`): Replaced DuckDB-era function denylist with explicit SQLite function and per-role table allowlists enforced in both `SQLValidator` and SQLite `setAuthorizer` (`FINDING-012`, `FINDING-014` fixed).
+- `CLAIM-019` (`SUPPORTED`): Added implicit comma-join, `NATURAL JOIN`, and constant/`OR`-branch `ON` tautology rejection (`FINDING-011` fixed).
+- `CLAIM-020` (`SUPPORTED`): Implemented three-layer fail-closed PII protection across recursive AST traversal (CTEs, subqueries, unions, expressions, predicates), SQLite `setAuthorizer` `SQLITE_READ` checks (including SQL views), and `enforceResultPolicy` value/pattern scanning (`FINDING-006`..`FINDING-010` fixed).
+- `CLAIM-021`, `CLAIM-025`, `CLAIM-026` (`SUPPORTED`): Moved SQLite execution to `node:sqlite` inside `node:worker_threads` with hard `worker.terminate()` deadline recovery, V8 `resourceLimits`, `enableDefensive(true)`, `enableLoadExtension(false)`, `PRAGMA query_only = ON`, `PRAGMA trusted_schema = OFF`, `PRAGMA cell_size_check = ON`, `PRAGMA max_page_count = 4096`, and `maxAuthorizerOps` (`FINDING-003`, `FINDING-004` fixed).
+- `CLAIM-027` (`SUPPORTED`): Explicitly labeled the 100-entry in-memory ring buffer as non-durable in code responses and docs.
+- `CLAIM-038` (`SUPPORTED`): Pinned all dependencies to exact semver versions, removed unused `sql.js`, upgraded `vitest` to `5.0.5` to remediate transitive `tinypool`/`@vitest/mocker` advisories (`FINDING-015` fixed), and added `scripts/verify-deps.ts` + `pnpm audit` to CI.
+
+### Honest Caveats Added
+- Documented `node:sqlite` `ExperimentalWarning` and non-reentrant `setAuthorizer` design in `README.md` and `src/database/sqlite-worker-code.ts`.

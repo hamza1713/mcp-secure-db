@@ -1,48 +1,43 @@
 # Claims Ledger
 
-Baseline recorded during Phase 0 prior to engineering remediation.
-Every factual, security, performance, maturity, or external claim across `README.md`, `Dockerfile`, `package.json`, `docs/`, and `src/` is cataloged below and mapped to an honest status (`SUPPORTED`, `PARTIAL`, `UNSUPPORTED`, or `UNVERIFIED`).
+Every factual, security, performance, maturity, or external claim across `README.md`, `Dockerfile`, `package.json`, `docs/`, and `src/` is cataloged below and mapped to an honest status (`SUPPORTED`, `PARTIAL`, `UNSUPPORTED`, `UNVERIFIED`, or `REMOVED`).
 
-## Baseline Test Run (Phase 0 Snapshot)
+## Baseline Test Snapshot (Phase 0 Historical Record)
 
-Executed command: `pnpm test` (`vitest run`) [E:CLAIM-014]
-- `tests/validator.test.ts`: 24 passed [E:CLAIM-014]
-- `tests/engine.test.ts`: 4 passed [E:CLAIM-014]
-- `tests/server.test.ts`: 16 passed [E:CLAIM-014]
-- `tests/rbac.test.ts`: 5 passed [E:CLAIM-014]
-- Total at Phase 0 snapshot: 4 test files, 49 tests passed (regression coverage written by the project author, not independent security validation) [E:CLAIM-014].
+Executed command at Phase 0: `vitest run` [E:CLAIM-014]
+- Total at Phase 0 snapshot: 4 test files, 49 tests passed [E:CLAIM-014].
 
 ## Ledger Table
 
 | ID | Claim Text | Location | Evidence Type | Evidence Reference | Status |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| CLAIM-001 | Server is built with the `mcp-use` TypeScript SDK version 2.12.2 | `package.json`, `pnpm-lock.yaml` | LOCKFILE | `pnpm-lock.yaml` | SUPPORTED |
-| CLAIM-002 | Project uses TypeScript 5.9.3, `node-sql-parser` 5.4.0, `sql.js` 1.15.2, `zod` 4.6.7, and `vitest` 3.2.7 | `pnpm-lock.yaml` | LOCKFILE | `pnpm-lock.yaml` | SUPPORTED |
+| CLAIM-001 | Server is built with the `mcp-use` TypeScript SDK pinned to version 2.12.2 | `package.json`, `pnpm-lock.yaml` | LOCKFILE | `pnpm-lock.yaml`, `scripts/verify-deps.ts` | SUPPORTED |
+| CLAIM-002 | Project pins TypeScript 5.9.3, `node-sql-parser` 5.4.0, `zod` 4.6.7, `@types/node` 22.20.5, and `vitest` 5.0.5 | `package.json`, `pnpm-lock.yaml` | LOCKFILE | `pnpm-lock.yaml`, `scripts/verify-deps.ts` | SUPPORTED |
 | CLAIM-003 | Validator runs locally in TypeScript without making an LLM API call (0 LLM tokens used by the validator itself) | `src/security/validator.ts` | TEST | `tests/validator.test.ts` | SUPPORTED |
-| CLAIM-004 | Lexical scanner blocks `--` and `/*` SQL comments outside string literals while allowing `--` inside single-quoted literals in tested cases | `src/security/validator.ts` | TEST | `tests/validator.test.ts` | SUPPORTED |
+| CLAIM-004 | Lexical scanner blocks `--` and `/*` SQL comments outside string/identifier quotes while allowing `--` inside single-quoted literals in tested cases | `src/security/validator.ts` | TEST | `tests/validator.test.ts` | SUPPORTED |
 | CLAIM-005 | Lexical scanner blocks semicolon-chained multi-statement strings outside quotes while allowing `;` inside single-quoted literals in tested cases | `src/security/validator.ts` | TEST | `tests/validator.test.ts` | SUPPORTED |
-| CLAIM-006 | AST check rejects top-level `DROP`, `DELETE`, `UPDATE`, `INSERT`, and `ALTER` statements in regression tests | `src/security/validator.ts` | TEST | `tests/validator.test.ts` | SUPPORTED |
-| CLAIM-007 | Validator injects default `LIMIT 100` when omitted and clamps top-level `LIMIT` values above `1000` down to `1000` | `src/security/validator.ts` | TEST | `tests/validator.test.ts` | SUPPORTED |
+| CLAIM-006 | AST check and SQLite authorizer reject `DROP`, `DELETE`, `UPDATE`, `INSERT`, `ALTER`, `PRAGMA`, and `ATTACH` statements in tests | `src/security/validator.ts`, `src/database/sqlite-worker-code.ts` | TEST | `tests/validator.test.ts`, `tests/sqlite-controls.test.ts` | SUPPORTED |
+| CLAIM-007 | Validator injects default `LIMIT 100` when omitted and clamps terminal `LIMIT` values above `1000` down to `1000` | `src/security/validator.ts` | TEST | `tests/validator.test.ts` | SUPPORTED |
 | CLAIM-008 | Server registers 6 MCP tools (`whoami`, `list_tables`, `describe_table`, `verify_query_safety`, `execute_analytical_sql`, `get_security_audit_log`), 2 resources (`schema://catalog`, `policy://security-rules`), and 2 prompts (`executive_analytics`, `red_team_security_audit`) | `src/index.ts` | TEST | `tests/server.test.ts` | SUPPORTED |
 | CLAIM-009 | Seeded demo database initializes 4 tables (`customers` with 5 rows, `api_usage` with 10 rows, `security_incidents` with 3 rows, `api_keys` with 4 rows) | `src/database/seed.ts` | TEST | `tests/engine.test.ts` | SUPPORTED |
-| CLAIM-010 | Direct calls to `execute_analytical_sql` reject `public_viewer` and direct calls to `get_security_audit_log` reject `public_viewer` and `analyst` | `src/index.ts` | TEST | `tests/server.test.ts` | SUPPORTED |
-| CLAIM-011 | `Dockerfile` uses a multi-stage `node:22-slim` build and runs as non-root user `appuser` (UID 1001) on port 8000 | `Dockerfile` | CODE | `Dockerfile` | SUPPORTED |
+| CLAIM-010 | Calls to `execute_analytical_sql` reject `unauthenticated` and `public_viewer`, and calls to `get_security_audit_log` reject non-admin roles | `src/index.ts` | TEST | `tests/server.test.ts` | SUPPORTED |
+| CLAIM-011 | `Dockerfile` uses a multi-stage `node:24-slim` build with `--frozen-lockfile` and runs as non-root user `appuser` (UID 1001) on port 8000 | `Dockerfile` | CODE | `Dockerfile` | SUPPORTED |
 | CLAIM-012 | Manufact was co-founded by Pietro Zullo and Luigi Pederzani, listed by Y Combinator in batch S25, with press reporting a February 2026 seed round led by Peak XV and CTO Enrico Toniato | `docs/mcp-secure-db-audit-and-remediation-report.md` | CITATION | `docs/mcp-secure-db-audit-and-remediation-report.md` | SUPPORTED |
-| CLAIM-013 | Installed `mcp-use` package exports OAuth context types (`OAuthAuth`, `OAuthMode`, `OAuthUpstreamToken`) | `node_modules/mcp-use/dist/index.d.ts` | LOCKFILE | `pnpm-lock.yaml` | SUPPORTED |
-| CLAIM-014 | Baseline Vitest regression suite executes 49 tests across 4 test files | `README.md`, `tests/` | TEST | `tests/validator.test.ts` | SUPPORTED |
-| CLAIM-015 | Layer 1 RBAC middleware dynamically hides unauthorized tools on `tools/list` requests | `README.md`, `src/index.ts` | NONE | `src/index.ts` | UNSUPPORTED |
-| CLAIM-016 | Resource `schema://catalog` enforces role-based table and PII masking | `README.md`, `src/index.ts` | NONE | `src/index.ts` | UNSUPPORTED |
-| CLAIM-017 | Unauthenticated or unrecognized tokens safely fall back to `public_viewer` with metadata access by default | `README.md`, `src/security/rbac.ts` | TEST | `tests/rbac.test.ts` | PARTIAL |
-| CLAIM-018 | Validator blocks SSRF and filesystem exfiltration via a denylist of `read_csv`, `read_csv_auto`, `read_parquet`, `parquet_scan`, `st_read`, `glob`, `load_extension`, `eval`, `sleep`, `repeat` | `README.md`, `src/security/validator.ts` | TEST | `tests/validator.test.ts` | PARTIAL |
-| CLAIM-019 | Validator rejects Cartesian joins and tautological join conditions | `README.md`, `src/security/validator.ts` | TEST | `tests/validator.test.ts` | PARTIAL |
-| CLAIM-020 | Validator enforces table and column-level PII protection for non-admin roles (`billing_email`, `stripe_customer_id`, `webhook_secret`, `client_ip`) | `README.md`, `src/security/validator.ts` | TEST | `tests/validator.test.ts` | PARTIAL |
-| CLAIM-021 | `LIMIT` clamping prevents compute exhaustion, memory crashes, and cloud bill shock | `README.md`, `docs/` | NONE | `src/security/validator.ts` | PARTIAL |
-| CLAIM-022 | Pre-execution AST validation runs in under 1 millisecond | `NONE (removed in Phase 1 pending Phase 3 benchmark)` | NONE | `NONE` | REMOVED |
+| CLAIM-013 | Installed `mcp-use` package (`2.12.2`) exports OAuth context types (`OAuthAuth`, `OAuthMode`, `OAuthUpstreamToken`) and `RBACManager` resolves verified OAuth scopes before static tokens | `src/security/rbac.ts` | TEST | `tests/rbac.test.ts`, `pnpm-lock.yaml` | SUPPORTED |
+| CLAIM-014 | Phase 0 baseline Vitest snapshot executed 49 tests across 4 test files prior to remediation | `docs/CLAIMS.md` | TEST | `tests/validator.test.ts` | SUPPORTED |
+| CLAIM-015 | Layer 1 MCP middleware (`mcp:tools/list` and `mcp:tools/call`) dynamically filters unauthorized tools from `tools/list` responses and blocks unauthorized `tools/call` invocations | `src/index.ts` | TEST | `tests/server.test.ts` | SUPPORTED |
+| CLAIM-016 | Resource `schema://catalog` rejects unauthenticated reads and filters admin-only tables and PII columns for non-admin roles | `src/index.ts` | TEST | `tests/server.test.ts` | SUPPORTED |
+| CLAIM-017 | Authentication defaults to deny (`unauthenticated` role receives only `whoami` and zero database/catalog tools) unless `MCP_SECURE_DB_INSECURE_DEMO=true` is explicitly enabled for missing tokens; invalid tokens always fail closed | `src/security/rbac.ts` | TEST | `tests/rbac.test.ts`, `tests/server.test.ts` | SUPPORTED |
+| CLAIM-018 | Both the AST validator and SQLite's compile-time `setAuthorizer` enforce an explicit SQLite scalar/aggregate function allowlist (`ALLOWED_FUNCTIONS`), rejecting `load_extension` and unknown functions by default | `src/security/policy.ts`, `src/security/validator.ts`, `src/database/sqlite-worker-code.ts` | TEST | `tests/validator.test.ts`, `tests/sqlite-controls.test.ts` | SUPPORTED |
+| CLAIM-019 | Validator rejects explicit `CROSS JOIN`, `NATURAL JOIN`, implicit comma-separated joins, and constant or self-equal `ON` tautologies (including `OR` branches) in tests | `src/security/validator.ts` | TEST | `tests/validator.test.ts` | SUPPORTED |
+| CLAIM-020 | Non-admin PII protection is enforced across three layers (recursive AST traversal of CTEs/subqueries/unions/expressions/predicates, SQLite compile-time `setAuthorizer` `SQLITE_READ` checks including views, and fail-closed result-level value scanning) | `src/security/validator.ts`, `src/database/sqlite-worker-code.ts`, `src/security/result-policy.ts` | TEST | `tests/pii-bypass.test.ts`, `tests/sqlite-controls.test.ts` | SUPPORTED |
+| CLAIM-021 | Row count clamping (`100` default, `1000` maximum) is paired with compile-time `maxAuthorizerOps` (`250`) and hard worker-thread deadline termination to bound query work | `src/security/policy.ts`, `src/database/engine.ts` | TEST | `tests/validator.test.ts`, `tests/sqlite-controls.test.ts` | SUPPORTED |
+| CLAIM-022 | Pre-execution AST validation runs in under 1 millisecond | `NONE (removed in Phase 1 pending Phase 3 benchmark)` | NONE | `REMOVED` | REMOVED |
 | CLAIM-023 | Validator performs deterministic AST C++ evaluation / runs at C++ AST speeds | `NONE (removed in Phase 1)` | NONE | `REMOVED` | REMOVED |
 | CLAIM-024 | Database runs in an in-memory kernel sandbox / hardware isolation with hardware watchdog timeouts | `NONE (removed in Phase 1)` | NONE | `REMOVED` | REMOVED |
-| CLAIM-025 | Engine enforces a 10-second hard execution timeout / watchdog | `src/database/engine.ts` | NONE | `src/database/engine.ts` | UNSUPPORTED |
-| CLAIM-026 | Engine enforces a 512MB memory boundary | `src/database/engine.ts` | NONE | `src/database/engine.ts` | UNSUPPORTED |
-| CLAIM-027 | Audit logger is an in-memory recent-events ring buffer (not durable across restarts) | `README.md`, `src/database/audit.ts` | TEST | `tests/engine.test.ts` | PARTIAL |
+| CLAIM-025 | SQLite executes inside a `node:worker_threads` worker thread that is terminated via `worker.terminate()` when a query exceeds `timeoutMs`, with automatic clean worker recovery | `src/database/engine.ts` | TEST | `tests/sqlite-controls.test.ts` | SUPPORTED |
+| CLAIM-026 | Worker thread applies V8 heap `resourceLimits` (`128` MiB old generation, `32` MiB young generation) and SQLite `enableDefensive(true)`, `enableLoadExtension(false)`, `PRAGMA query_only = ON`, `PRAGMA trusted_schema = OFF`, `PRAGMA cell_size_check = ON`, `PRAGMA temp_store = MEMORY`, and `PRAGMA max_page_count = 4096` | `src/database/sqlite-worker-code.ts`, `src/database/engine.ts` | TEST | `tests/sqlite-controls.test.ts` | SUPPORTED |
+| CLAIM-027 | In-memory recent-events buffer retains up to 100 entries for debugging and explicitly reports that it is not durable across restarts | `src/database/audit.ts`, `src/index.ts` | TEST | `tests/engine.test.ts`, `tests/server.test.ts` | SUPPORTED |
 | CLAIM-028 | System mitigates all four threat vectors (prompt injection DDL/DML, SSRF, DoS, PII exfiltration) | `NONE (removed in Phase 1)` | NONE | `REMOVED` | REMOVED |
 | CLAIM-029 | System provides mathematical, deterministic security guarantees | `NONE (removed in Phase 1)` | NONE | `REMOVED` | REMOVED |
 | CLAIM-030 | Repository and Dockerfile are compliant with Manufact Cloud (Dockpack) standards | `docs/OPEN_QUESTIONS.md` | NONE | `NONE` | UNVERIFIED |
@@ -53,3 +48,4 @@ Executed command: `pnpm test` (`vitest run`) [E:CLAIM-014]
 | CLAIM-035 | Upstream maintainer bot auto-closed a Python PR stating focus is on the TypeScript SDK | `docs/OPEN_QUESTIONS.md` | NONE | `NONE` | UNVERIFIED |
 | CLAIM-036 | Legacy Python/DuckDB claims (`server.py`, `sqlglot`, DuckDB `conn.interrupt()`, 96 pytest tests) describe the current repository | `NONE (obsolete reports deleted in Phase 1)` | NONE | `REMOVED` | REMOVED |
 | CLAIM-037 | Automated claims linter (`scripts/claims-lint.ts`) enforces evidence tags, checks ledger file paths, and rejects inflated, regulatory-certification, maturity, and local-path text in `pnpm test` and CI | `scripts/claims-lint.ts`, `.github/workflows/ci.yml` | TEST | `tests/claims-lint.test.ts` | SUPPORTED |
+| CLAIM-038 | All dependencies in `package.json` are pinned to exact semver versions, verified against `pnpm-lock.yaml` `sha512` integrity hashes by `scripts/verify-deps.ts` and audited with zero known npm advisories (`pnpm audit`) | `package.json`, `scripts/verify-deps.ts`, `.github/workflows/ci.yml` | TEST | `scripts/verify-deps.ts`, `pnpm-lock.yaml` | SUPPORTED |

@@ -1,126 +1,120 @@
 # mcp-secure-db (TypeScript)
 
 > **Reference implementation and proof of concept for layered SQL query guardrails over MCP**  
-> Built with the `mcp-use` TypeScript SDK (`2.12.2` [E:CLAIM-001]), `node-sql-parser` (`5.4.0` [E:CLAIM-002]), and an in-process SQLite sandbox (`sql.js` `1.15.2` [E:CLAIM-002]).
+> Built with the `mcp-use` TypeScript SDK (`2.12.2` [E:CLAIM-001]), `node-sql-parser` (`5.4.0` [E:CLAIM-002]), and a worker-isolated `node:sqlite` sandbox [E:CLAIM-025] [E:CLAIM-026].
 
 ---
 
 ## 1. Overview and Scope
 
-Exposing analytical databases to AI agents over the **Model Context Protocol (MCP)** creates concrete risks:
-1. **Destructive or mutating SQL**: Prompt-injected or malformed agent calls attempting `DROP`, `ALTER`, `DELETE`, `UPDATE`, or `INSERT`.
-2. **Dangerous engine functions and extension loading**: Queries invoking extension loaders or unexpected SQL functions.
-3. **Expensive joins and unbounded result sets**: Cartesian joins or queries returning excessive rows.
-4. **Over-broad table and sensitive-column access**: Agents reading tables or columns outside the caller's role scope.
+Exposing analytical databases to AI agents over the **Model Context Protocol (MCP)** introduces concrete security and operational risks:
+1. **Mutating or administrative SQL**: Prompt-injected or malformed agent calls attempting `DROP`, `ALTER`, `DELETE`, `UPDATE`, `INSERT`, `PRAGMA`, or `ATTACH`.
+2. **Non-allowlisted functions and extension loading**: Queries invoking `load_extension` or unexpected SQLite functions.
+3. **Expensive joins and runaway recursive queries**: Unconstrained Cartesian joins or CPU-heavy recursive CTEs blocking the server process.
+4. **Over-broad table and sensitive-column access**: Agents reading restricted tables or sensitive columns via aliases, CTEs, subqueries, expressions, views, or wildcards.
 
-`mcp-secure-db` is an open-source **reference implementation and proof of concept** demonstrating how an MCP server can combine role checks, local JavaScript AST validation (requiring zero LLM API calls [E:CLAIM-003]), an isolated SQLite demo dataset, and an audit log, paired with an automated claims linter (`scripts/claims-lint.ts` [E:CLAIM-037]) that blocks unverified security or performance claims in documentation.
+`mcp-secure-db` is an open-source **reference implementation and proof of concept** demonstrating layered controls for read-only analytical SQL over MCP, paired with an automated claims linter (`scripts/claims-lint.ts` [E:CLAIM-037]) and dependency pinning verifier (`scripts/verify-deps.ts` [E:CLAIM-038]).
 
 ---
 
-## 2. Current Layered Architecture (Baseline Proof of Concept)
+## 2. Four-Layer Architecture
 
 ```
 ┌────────────────────────────────────────────────────────────────────────┐
-│  LAYER 1: Role-Based Authorization                                     │
-│  - Resolves caller role from token (public_viewer, analyst, admin)     │
-│  - Enforces handler-level role checks on SQL execution and audit tools │
+│  LAYER 1: Default-Deny RBAC & MCP Wire Middleware                      │
+│  - Default-deny: missing or invalid credentials get only `whoami`      │
+│  - `mcp:tools/list` hides unauthorized tools per caller role           │
+│  - `mcp:tools/call` and `schema://catalog` enforce role permissions    │
+│  - Resolves verified `mcp-use` OAuth scopes before static demo tokens  │
 ├────────────────────────────────────────────────────────────────────────┤
-│  LAYER 2: Local JavaScript AST Validator (node-sql-parser)             │
+│  LAYER 2: Local JavaScript AST Validator (node-sql-parser, SQLite)     │
 │  - Validates SQL locally without calling an external LLM               │
-│  - Blocks SQL comments, semicolon-chained statements, and top-level    │
-│    non-SELECT statements in regression tests                           │
-│  - Injects default LIMIT 100 and clamps top-level LIMIT to 1000        │
+│  - Recursive traversal of WITH CTEs, subqueries, and UNION branches    │
+│  - Explicit SQLite function and per-role table allowlists              │
+│  - Blocks implicit comma joins, CROSS/NATURAL JOIN, and ON tautologies │
+│  - Clamps/injects terminal LIMIT (default 100, maximum 1000)           │
 ├────────────────────────────────────────────────────────────────────────┤
-│  LAYER 3: In-Process WebAssembly SQLite Engine (sql.js)                │
-│  - Runs against seeded in-memory demo tables with no filesystem or     │
-│    network handles exposed to the WASM SQLite instance                 │
+│  LAYER 3: Worker-Isolated SQLite Sandbox (node:worker_threads)         │
+│  - Runs `node:sqlite` inside an OS worker thread terminated on timeout │
+│  - Enables defensive mode, disables extension loading, sets query_only │
+│  - Enforces V8 worker heap limits and SQLite max_page_count cap        │
+│  - Compile-time `setAuthorizer` independently checks actions, tables,  │
+│    base columns (including through SQL views), and allowlisted funcs   │
 ├────────────────────────────────────────────────────────────────────────┤
-│  LAYER 4: In-Memory Recent-Events Buffer                               │
-│  - Retains recent query executions and blocked requests in memory      │
-│    (not durable across restarts)                                       │
+│  LAYER 4: Fail-Closed Result Policy & Recent-Events Audit Buffer       │
+│  - Scans output columns and cell values for restricted PII patterns    │
+│  - Records allowed and blocked calls in an in-memory buffer            │
+│    (explicitly non-durable across restarts)                            │
 └────────────────────────────────────────────────────────────────────────┘
 ```
 
-> **Active Engineering Remediation Note:** Known baseline gaps in CTE/subquery AST traversal, default-deny authentication, worker-thread query deadlines, function allowlisting, and persistent audit logging are cataloged in `docs/FINDINGS.md` and `docs/CLAIMS.md`.
+### Engine Trade-Off and Stability Caveat (`node:sqlite` vs `sql.js` vs `better-sqlite3`)
+
+- **`sql.js` (previous engine):** Runs synchronously in WebAssembly on the calling thread and does not expose SQLite's `sqlite3_set_authorizer` or `SQLITE_DBCONFIG_DEFENSIVE` APIs in its standard JavaScript wrapper.
+- **`better-sqlite3`:** Mature native addon, but requires native C++ prebuilts or `node-gyp` toolchains across platforms and Node ABI versions.
+- **`node:sqlite` in `node:worker_threads` (selected):** Ships built into Node `>= 22.13.0` / Node `24` with zero native compilation steps and exposes `enableDefensive(true)`, `enableLoadExtension(false)`, and `setAuthorizer(...)` [E:CLAIM-026].
+- **Stability caveat:** Node.js marks `node:sqlite` as an experimental / release-candidate API (`ExperimentalWarning`), and upstream issues note reentrancy hazards if `DatabaseSync` methods are invoked inside `setAuthorizer`. To mitigate this, the worker's `setAuthorizer` callback performs pure in-memory `Set` and counter checks with zero reentrant database calls [E:CLAIM-026].
 
 ---
 
-## 3. MCP Primitives Implemented
+## 3. Authentication and Role Model
 
-The server registers 6 MCP tools, 2 resources, and 2 prompts [E:CLAIM-008]:
+Authentication enforces **default-deny** [E:CLAIM-017]:
+- Verified OAuth access tokens (`ctx.auth` in `mcp-use` `2.12.2` [E:CLAIM-013]) are checked first (`db:read:metadata`, `db:execute:analytics`, `db:audit:read`, `db:pii:access`).
+- For standalone local testing without an external OAuth identity provider, static Bearer tokens (`Authorization: Bearer <token>`) are supported:
 
-### Tools
-
-| Tool | Description | Role Required |
+| Credentials | Resolved Role | Allowed Tools |
 | :--- | :--- | :--- |
-| `whoami` | Inspect active principal, role, scopes, and allowed tools | `public_viewer`, `analyst`, `admin` |
-| `list_tables` | List accessible demo tables with row counts and visible columns | `public_viewer`, `analyst`, `admin` |
-| `describe_table` | Inspect column metadata and PII flags for an authorized table | `public_viewer`, `analyst`, `admin` |
-| `verify_query_safety` | Dry-run local JavaScript AST validation without executing the query | `public_viewer`, `analyst`, `admin` |
-| `execute_analytical_sql` | Execute validated `SELECT` queries against the seeded SQLite dataset [E:CLAIM-010] | `analyst`, `admin` |
-| `get_security_audit_log` | Inspect the in-memory recent-events audit buffer [E:CLAIM-010] | `admin` |
+| *(Missing or Invalid)* | `unauthenticated` | `whoami` only (all data/catalog calls denied and logged) [E:CLAIM-017] |
+| `token-viewer-demo` | `public_viewer` | `whoami`, `list_tables`, `describe_table`, `verify_query_safety` |
+| `token-analyst-demo` | `analyst` | Viewer tools + `execute_analytical_sql` (non-admin tables, PII blocked) [E:CLAIM-010] |
+| `token-admin-demo` | `admin` | All 6 tools including `get_security_audit_log` and admin tables [E:CLAIM-008] [E:CLAIM-010] |
 
-### Resources
-
-* `schema://catalog`: JSON catalog of demo warehouse tables (`customers`, `api_usage`, `security_incidents`, `api_keys` [E:CLAIM-009]).
-* `policy://security-rules`: Markdown summary of active server policy layers.
-
-### Prompts
-
-* `executive_analytics`: Guided prompt template for SaaS usage analysis.
-* `red_team_security_audit`: Prompt template for testing query validation rules.
+> **Insecure Demo Flag Warning:** Setting `MCP_SECURE_DB_INSECURE_DEMO=true` allows requests *without* credentials to fall back to `public_viewer` for local inspector demos [E:CLAIM-017]. This flag weakens default-deny metadata protection and must **never** be enabled in shared or untrusted environments. Invalid tokens still fail closed even when this flag is set [E:CLAIM-017].
 
 ---
 
 ## 4. Quick Start and Verification
 
 ### Prerequisites
-* Node.js `>= 22.0.0`
+* Node.js `>= 22.13.0` (Node `24` recommended and used in CI/Docker [E:CLAIM-011])
 * `pnpm`
 
 ### Commands
 
 ```bash
-# 1. Install dependencies from lockfile
+# 1. Install pinned dependencies from lockfile
 pnpm install --frozen-lockfile
 
-# 2. Run TypeScript type checks
+# 2. Verify exact dependency pinning and npm advisories
+pnpm run deps:verify
+pnpm audit --audit-level=high
+
+# 3. Run TypeScript type checks
 pnpm run typecheck
 
-# 3. Run Vitest suite and claims-lint
+# 4. Run Vitest suite, claims-lint, and verify-deps
 pnpm test
 
-# 4. Build the server bundle
+# 5. Build the server bundle
 pnpm run build
-
-# 5. Start local development server
-pnpm run dev
 ```
 
 ---
 
-## 5. Container Build
+## 5. Limitations and Non-Goals
 
-The repository includes a multi-stage `Dockerfile` running as non-root `appuser` (UID `1001`) on port `8000` [E:CLAIM-011]:
-
-```bash
-docker build -t mcp-secure-db .
-docker run -p 8000:8000 mcp-secure-db
-```
-
----
-
-## 6. Limitations and Non-Goals
-
-- **Does not prevent prompt injection:** SQL validation and read-only execution restrict what SQL operations an agent can run; they do not stop a prompt-injected agent from querying data its assigned role is permitted to read.
-- **Baseline limitations documented in `docs/FINDINGS.md`:** Prior to Phase 2–4 hardening, column-name checks, denylist function checks, synchronous `sql.js` execution, fallback viewer access, and non-durable in-memory audit buffering have documented limitations (`CLAIM-017` through `CLAIM-021`, `CLAIM-027`).
-- **Demo dataset scope:** Default execution runs against seeded in-memory SQLite data [E:CLAIM-009] and does not represent production telemetry against external data warehouses.
-- **Not a formal proof:** Deterministic parser and engine checks reduce risk for tested patterns; they are not formal verification.
-- **No regulatory compliance claim:** No claim of GDPR, HIPAA, SOC 2, or PCI compliance is made, and the recent-events buffer is not designed for regulatory compliance auditing.
-- **Independent review pending:** All tests in this repository were authored alongside the implementation; independent human security review is recommended before any production use.
+- **Does not prevent prompt injection:** The validator, SQLite authorizer, and worker sandbox limit what SQL operations an injected instruction can execute; they do **not** stop a prompt-injected agent from reading data its authenticated role is permitted to access.
+- **Inference and aggregation on permitted columns:** Statistical or multi-query inference over non-PII columns that a role is allowed to query remains possible.
+- **`node:sqlite` experimental status:** Built-in `node:sqlite` emits an `ExperimentalWarning` in Node.js and may evolve across Node releases.
+- **Demo dataset scope:** Default execution runs against 4 seeded in-memory SQLite tables [E:CLAIM-009] and is not evidence of production behavior against external cloud data warehouses.
+- **In-memory audit buffer durability:** The 100-entry ring buffer is an in-memory debugging cache and is not durable across process restarts [E:CLAIM-027].
+- **Not a formal proof:** Parser, authorizer, and result-level checks reduce risk for tested patterns; they do not constitute formal verification.
+- **No regulatory compliance claim:** No claim of GDPR, HIPAA, SOC 2, or PCI compliance is made, and this software is out of scope for regulatory compliance certification.
+- **Independent review pending:** All tests in this repository were written alongside the code; independent human security review is recommended before any production deployment.
 
 ---
 
-## 7. License
+## 6. License
 
 MIT
