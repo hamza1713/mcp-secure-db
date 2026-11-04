@@ -4,6 +4,8 @@ import { UserRole, ValidationResult } from "../types.js";
 import { TABLE_METADATA } from "../database/seed.js";
 import {
   ALLOWED_FUNCTIONS,
+  ALLOWED_FUNCTIONS_POSTGRES,
+  POSTGRES_FORBIDDEN_FUNCTION_PREFIXES,
   PII_COLUMNS,
   SQL_LIMITS,
   getAllowedTablesForRole,
@@ -14,7 +16,10 @@ const DISALLOWED_CONTROL_CHARS_REGEX =
 
 const DISALLOWED_OPERATORS = new Set(["GLOB", "REGEXP", "MATCH"]);
 
+export type SQLDialect = "sqlite" | "postgresql";
+
 export interface SQLValidatorOptions {
+  dialect?: SQLDialect;
   maxRows?: number;
   defaultLimit?: number;
   maxSqlLength?: number;
@@ -39,6 +44,7 @@ interface ValidationState {
 
 export class SQLValidator {
   private parser: any;
+  public readonly dialect: SQLDialect;
   private maxRows: number;
   private defaultLimit: number;
   private maxSqlLength: number;
@@ -52,6 +58,7 @@ export class SQLValidator {
 
   constructor(options: SQLValidatorOptions = {}) {
     this.parser = new Parser();
+    this.dialect = options.dialect ?? "sqlite";
     this.maxRows = options.maxRows ?? SQL_LIMITS.maxRows;
     this.defaultLimit = options.defaultLimit ?? SQL_LIMITS.defaultLimit;
     this.maxSqlLength = options.maxSqlLength ?? SQL_LIMITS.maxSqlLength;
@@ -356,7 +363,7 @@ export class SQLValidator {
 
     let ast: any;
     try {
-      ast = this.parser.astify(trimmed, { database: "sqlite" });
+      ast = this.parser.astify(trimmed, { database: this.dialect });
     } catch (err: any) {
       return {
         valid: false,
@@ -460,7 +467,7 @@ export class SQLValidator {
 
     let sanitizedQuery: string;
     try {
-      sanitizedQuery = this.parser.sqlify(ast, { database: "sqlite" });
+      sanitizedQuery = this.parser.sqlify(ast, { database: this.dialect });
     } catch (err: any) {
       return {
         valid: false,
@@ -930,10 +937,21 @@ export class SQLValidator {
         return;
       }
 
-      if (!funcName || !ALLOWED_FUNCTIONS.has(funcName)) {
-        throw new Error(
-          `Function '${funcName || "unknown"}()' is not in the permitted SQLite function allowlist.`
+      if (this.dialect === "postgresql") {
+        const isForbiddenPrefix = POSTGRES_FORBIDDEN_FUNCTION_PREFIXES.some(
+          (prefix) => funcName.startsWith(prefix)
         );
+        if (isForbiddenPrefix || !ALLOWED_FUNCTIONS_POSTGRES.has(funcName)) {
+          throw new Error(
+            `Function '${funcName || "unknown"}()' is not in the permitted PostgreSQL function allowlist.`
+          );
+        }
+      } else {
+        if (!funcName || !ALLOWED_FUNCTIONS.has(funcName)) {
+          throw new Error(
+            `Function '${funcName || "unknown"}()' is not in the permitted SQLite function allowlist.`
+          );
+        }
       }
       state.functionsUsed.add(funcName);
 

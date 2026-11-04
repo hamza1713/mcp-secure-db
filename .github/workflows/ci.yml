@@ -40,3 +40,48 @@ jobs:
 
       - name: Build MCP server bundle
         run: pnpm run build
+
+  postgres-integration:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_DB: mcp_analytics
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres_test_pw
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d mcp_analytics"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Setup Node.js 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: "pnpm"
+
+      - name: Install dependencies (frozen lockfile)
+        run: pnpm install --frozen-lockfile
+
+      - name: Provision PostgreSQL schema, seed data, and roles
+        run: |
+          sudo apt-get update && sudo apt-get install -y postgresql-client
+          PGPASSWORD=postgres_test_pw psql -h localhost -U postgres -d mcp_analytics -v ON_ERROR_STOP=1 -f docker/postgres/init/01-schema.sql
+          PGPASSWORD=postgres_test_pw psql -h localhost -U postgres -d mcp_analytics -v ON_ERROR_STOP=1 -f docker/postgres/init/02-roles.sql
+
+      - name: Run live PostgreSQL integration test suite
+        env:
+          PG_TEST_URL: postgres://mcp_gateway:mcp_gateway_test_pw@localhost:5432/mcp_analytics
+        run: pnpm run test:integration

@@ -1,12 +1,14 @@
 import { MCPServer } from "mcp-use";
 import { z } from "zod";
 import { rbacManager } from "./security/rbac.js";
-import { dbEngine } from "./database/engine.js";
+import { createQueryEngine, QueryEngine } from "./database/query-engine.js";
 import { sqlValidator } from "./security/validator.js";
 import { auditLogger } from "./database/audit.js";
 import { defaultRateLimiter } from "./security/rate-limiter.js";
 import { TABLE_METADATA } from "./database/seed.js";
 import { SecurityContext, UserRole } from "./types.js";
+
+export const activeEngine: QueryEngine = createQueryEngine();
 
 const server = new MCPServer({
   name: "mcp-secure-db",
@@ -184,7 +186,7 @@ export async function handleListTables(
     return denyToolCall(secCtx, "list_tables", "public_viewer", "CALL list_tables");
   }
 
-  const tables = dbEngine.getTables(secCtx.role);
+  const tables = activeEngine.getTables(secCtx.role);
   return {
     content: [
       {
@@ -217,7 +219,7 @@ export async function handleDescribeTable(
     );
   }
 
-  const schema = dbEngine.getTableSchema(table_name, secCtx.role);
+  const schema = activeEngine.getTableSchema(table_name, secCtx.role);
   if (!schema) {
     return {
       isError: true,
@@ -314,7 +316,7 @@ export async function handleExecuteAnalyticalSql(
   }
 
   try {
-    const result = await dbEngine.executeQuery(
+    const result = await activeEngine.executeQuery(
       query,
       secCtx.role,
       secCtx.principal

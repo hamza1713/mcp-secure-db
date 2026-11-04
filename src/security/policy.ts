@@ -40,6 +40,60 @@ export const ALLOWED_FUNCTIONS_LIST = [
 export const ALLOWED_FUNCTIONS = new Set<string>(ALLOWED_FUNCTIONS_LIST);
 
 /**
+ * Explicit PostgreSQL scalar and aggregate function allowlist.
+ * Unknown or administrative functions (e.g. pg_sleep, pg_read_file, lo_import,
+ * dblink, set_config) are rejected by default.
+ */
+export const ALLOWED_FUNCTIONS_POSTGRES_LIST = [
+  "abs",
+  "avg",
+  "coalesce",
+  "count",
+  "current_date",
+  "current_time",
+  "current_timestamp",
+  "date_part",
+  "date_trunc",
+  "extract",
+  "length",
+  "lower",
+  "ltrim",
+  "max",
+  "min",
+  "now",
+  "nullif",
+  "replace",
+  "round",
+  "rtrim",
+  "substr",
+  "substring",
+  "sum",
+  "to_char",
+  "to_date",
+  "to_timestamp",
+  "trim",
+  "upper",
+] as const;
+
+export const ALLOWED_FUNCTIONS_POSTGRES = new Set<string>(
+  ALLOWED_FUNCTIONS_POSTGRES_LIST
+);
+
+/**
+ * High-risk function prefixes and administrative functions explicitly blocked
+ * as defense-in-depth on PostgreSQL engines.
+ */
+export const POSTGRES_FORBIDDEN_FUNCTION_PREFIXES = [
+  "pg_",
+  "lo_",
+  "dblink",
+  "query_to_xml",
+  "set_config",
+  "current_setting",
+  "version",
+] as const;
+
+/**
  * Explicit per-role base table allowlists.
  * SQLite internal catalog tables (sqlite_master, sqlite_schema, etc.) are excluded for all roles.
  */

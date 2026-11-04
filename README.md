@@ -103,7 +103,7 @@ Authentication enforces **default-deny** [E:CLAIM-017]:
 
 ## 5. Verification and Test Suite
 
-The test suite includes 181 automated tests across 15 test files [E:CLAIM-048]:
+The test suite includes 184 automated tests across 15 test files [E:CLAIM-048]:
 
 - **Bypass Corpus (`tests/bypass-corpus/`)**: 32 structured adversarial vectors covering comment tricks, unicode, quoting, function I/O exploits, CTE mutations, and Cartesian joins [E:CLAIM-039].
 - **Differential Testing (`tests/differential.test.ts`)**: 93 queries compared across AST validator and real SQLite authorizer to confirm zero security divergences [E:CLAIM-040].
@@ -111,7 +111,7 @@ The test suite includes 181 automated tests across 15 test files [E:CLAIM-048]:
 - **Self Red-Team Pass (`tests/red-team-self.test.ts`)**: 32 adversarial test cases verifying all fail closed [E:CLAIM-042].
 - **Worker Timeout & Pragmas (`tests/sqlite-controls.test.ts`)**: Verifies hard worker-thread deadline termination on slow recursive CTEs [E:CLAIM-025].
 - **Result PII Protection (`tests/pii-bypass.test.ts`)**: 25 tests proving fail-closed blocking across views, CTEs, subqueries, aliases, and cell values [E:CLAIM-020].
-- **Experimental PostgreSQL Adapter (`tests/postgres-adapter.test.ts`)**: Validates read-only transaction parameters, `statement_timeout`, and schema allowlists [E:CLAIM-043].
+- **PostgreSQL Query Engine (`tests/postgres-adapter.test.ts`, `tests/integration/`)**: Validates connection pool lifecycle, `BEGIN READ ONLY` transactions, `SET LOCAL ROLE` (`mcp_viewer`, `mcp_analyst`, `mcp_admin`), `statement_timeout`, schema allowlists, and dialect parsing [E:CLAIM-043], [E:CLAIM-049], [E:CLAIM-050].
 - **Rate Limiting & Audit (`tests/rate-limiter.test.ts`, `tests/audit.test.ts`)**: Tests per-principal rate limits, row budgets, and sensitive literal redaction [E:CLAIM-044], [E:CLAIM-045].
 - **Claims Linter (`tests/claims-lint.test.ts`)**: Enforces claims-evidence mapping in CI [E:CLAIM-037].
 
@@ -136,6 +136,11 @@ pnpm run bench
 
 # 6. Build the server bundle
 pnpm run build
+
+# 7. (Optional) Run live PostgreSQL integration tests (requires Docker or local Postgres)
+pnpm run pg:up
+pnpm run test:integration
+pnpm run pg:down
 ```
 
 ---
@@ -147,7 +152,7 @@ pnpm run build
 - **`node:sqlite` experimental status:** Built-in `node:sqlite` emits an `ExperimentalWarning` in Node.js and may evolve across Node releases.
 - **Demo dataset scope:** Default execution runs against 4 seeded in-memory SQLite tables [E:CLAIM-009] and is not evidence of production behavior against external cloud data warehouses.
 - **In-memory audit buffer durability:** The 100-entry ring buffer is an in-memory debugging cache and is not durable across process restarts [E:CLAIM-027]. A persistent append-only log is written to `data/audit.jsonl` [E:CLAIM-045].
-- **Experimental PostgreSQL adapter:** The PostgreSQL adapter (`src/database/postgres-adapter.ts`) is marked `EXPERIMENTAL` and requires validation against target PostgreSQL cluster deployments [E:CLAIM-043].
+- **PostgreSQL cluster configuration**: The PostgreSQL engine (`src/database/postgres-adapter.ts` [E:CLAIM-043]) requires appropriate least-privilege roles (`mcp_viewer`, `mcp_analyst`, `mcp_admin`, `mcp_gateway`) and column grants provisioned on target databases (see `docker/postgres/init/02-roles.sql`).
 - **Not a formal security proof:** Parser, authorizer, and result-level checks reduce risk for tested patterns; they do not constitute a formal proof of security.
 - **No regulatory compliance claim:** No claim of GDPR, HIPAA, SOC 2, or PCI compliance is made, and this software is out of scope for regulatory compliance certification.
 - **Independent review recommendation:** All tests in this repository were written alongside the code; independent human security review is recommended before any production deployment.

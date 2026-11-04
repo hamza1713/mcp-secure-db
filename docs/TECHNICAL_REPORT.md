@@ -2,8 +2,8 @@
 
 > **Maturity Status**: Hardened reference implementation and proof of concept  
 > **Framework**: `mcp-use` TypeScript SDK (`2.12.2` [E:CLAIM-001])  
-> **Database Sandbox**: Worker-isolated `node:sqlite` (`Node >= 22.13.0` / Node `24` [E:CLAIM-011], [E:CLAIM-025], [E:CLAIM-026])  
-> **Test Coverage**: 181 automated tests across 15 test suites [E:CLAIM-048]
+> **Database Sandbox**: Worker-isolated `node:sqlite` (`Node >= 22.13.0` / Node `24` [E:CLAIM-011], [E:CLAIM-025], [E:CLAIM-026]) and PostgreSQL connection pool (`pg.Pool` [E:CLAIM-043])  
+> **Test Coverage**: 184 automated tests across 15 test suites [E:CLAIM-048]
 
 ---
 
@@ -30,7 +30,7 @@ The repository has been restructured into a hardened reference implementation fe
 
 ## 2. Forensic Audit Findings Register
 
-The audit identified 15 distinct vulnerabilities and architectural findings:
+The audit identified 19 distinct vulnerabilities and architectural findings:
 
 | Finding ID | Severity | Category | Description | Remediation Architecture & Evidence |
 | :--- | :--- | :--- | :--- | :--- |
@@ -49,6 +49,10 @@ The audit identified 15 distinct vulnerabilities and architectural findings:
 | **FINDING-013** | High | Access Control | Permissive fallback allowed unauthenticated tool calls | Enforced default-deny authentication; `unauthenticated` role receives only `whoami` [E:CLAIM-017]. Insecure demo flag documented [E:CLAIM-017]. |
 | **FINDING-014** | Medium | Policy | Per-role table access rules were incomplete | Implemented strict per-role table allowlists (`ROLE_ALLOWED_TABLES`) enforced at AST, authorizer, and catalog resource [E:CLAIM-018]. |
 | **FINDING-015** | High | Supply Chain | Transitive dependency vulnerabilities in `vitest@3.2.7` (`tinypool` prototype pollution) | Pinned `vitest@5.0.5`, pinned all dependencies to exact semver, and added `scripts/verify-deps.ts` and `pnpm audit` [E:CLAIM-038]. |
+| **FINDING-016** | High | Database | Simulated execution on experimental Postgres adapter | Replaced simulated formatting with real `pg.Pool` connection pool, `BEGIN READ ONLY` transactions, and session resets [E:CLAIM-043]. |
+| **FINDING-017** | Medium | Database | Unrestricted `search_path` on Postgres connection | Added `SET LOCAL search_path = public, pg_temp` to prevent schema search-path spoofing [E:CLAIM-043]. |
+| **FINDING-018** | High | Validator | Single-dialect SQLite parser rejected Postgres syntax | Extended `SQLValidator` to support PostgreSQL dialect, casts (`::`), and explicit Postgres function allowlist [E:CLAIM-049]. |
+| **FINDING-019** | High | Authorization | Reliance on AST-only column hiding without database role scoping | Implemented database-level PostgreSQL role authorization (`SET LOCAL ROLE`) with column-level grants (`02-roles.sql`) [E:CLAIM-043]. |
 
 ---
 
@@ -166,7 +170,7 @@ As documented in `docs/OPEN_QUESTIONS.md`:
 - `OQ-002`: Scope of historical npm security notices on `mcp-use` mitigated by lockfile pinning and automated CI auditing.
 - `OQ-003`: Upstream PR auto-close bot URLs unverified; not cited without primary link.
 - `OQ-004`: Quantitative CISO adoption statistics avoided without primary survey citations.
-- `OQ-005`: PostgreSQL adapter marked `EXPERIMENTAL` pending validation against live cluster.
+- `OQ-005`: PostgreSQL adapter graduated to supported query engine with connection pooling, database-level role enforcement, and CI container testing [E:CLAIM-043].
 - `OQ-006`: Independent third-party human security review remains recommended prior to production deployment.
 
 ---
@@ -177,7 +181,7 @@ The repository was evaluated against all 8 acceptance criteria:
 
 | Criterion | Requirement | Verification Command / File | Status |
 | :--- | :--- | :--- | :--- |
-| **1. Clean CI Suite** | `pnpm test`, `claims:lint`, and `deps:verify` pass on clean checkout | `pnpm test` (181 tests pass) [E:CLAIM-048] | **PASSED** |
+| **1. Clean CI Suite** | `pnpm test`, `claims:lint`, and `deps:verify` pass on clean checkout | `pnpm test` (184 tests pass) [E:CLAIM-048] | **PASSED** |
 | **2. Worker Timeout Kill** | Slow recursive CTE terminated via `worker.terminate()` in tests | `tests/sqlite-controls.test.ts` [E:CLAIM-025] | **PASSED** |
 | **3. Allowlists & Bypass Corpus** | Function/table allowlists active; 32 bypass cases fail closed | `tests/bypass-corpus.test.ts` [E:CLAIM-039] | **PASSED** |
 | **4. Differential & Fuzz Runs** | Differential testing (93 queries) and fuzzing (300 queries) pass | `tests/differential.test.ts`, `tests/fuzz.test.ts` [E:CLAIM-040], [E:CLAIM-041] | **PASSED** |

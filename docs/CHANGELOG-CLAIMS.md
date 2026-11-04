@@ -75,3 +75,17 @@ Tracks every claim added, softened, removed, or newly supported across remediati
 - `CLAIM-045` (`SUPPORTED`) [E:CLAIM-045]: Implemented persistent append-only JSONL logging to `data/audit.jsonl` with sensitive literal scrubbing (emails, tokens, IPs) alongside an in-memory cache, verified in `tests/audit.test.ts`.
 - `CLAIM-046` (`SUPPORTED`) [E:CLAIM-046]: Added explicit `untrustedData: true` and prompt safety notices to database query result sets to mitigate prompt injection risk, verified in `tests/server.test.ts`.
 - `CLAIM-047` (`SUPPORTED`) [E:CLAIM-047]: Published comprehensive threat model in `docs/THREAT_MODEL.md` documenting the lethal-trifecta exposure, layer boundaries, and OWASP MCP / LLM Top 10 coverage.
+
+## Phase 4.1 — PostgreSQL Adapter Graduation (Dual Engine Support)
+
+### Newly Supported Claims (`docs/CLAIMS.md`)
+- `CLAIM-043` (`SUPPORTED`) [E:CLAIM-043]: Graduated PostgreSQL adapter in `src/database/postgres-adapter.ts` to `PostgresQueryEngine` backed by a connection pool (`pg.Pool`), session-scoped `BEGIN READ ONLY` transactions, `SET LOCAL ROLE` (`mcp_viewer`, `mcp_analyst`, `mcp_admin`) with database-level column grants (`docker/postgres/init/02-roles.sql`), `SET LOCAL statement_timeout`, and schema allowlists. Verified via unit/protocol tests (`tests/postgres-adapter.test.ts`), live container integration suite (`tests/integration/postgres-live.test.ts`), and CI container workflow in `.github/workflows/ci.yml`.
+- `CLAIM-048` (`SUPPORTED`) [E:CLAIM-048]: Updated automated test suite count from 181 to 184 passing tests across 15 test files in `pnpm test`.
+- `CLAIM-049` (`SUPPORTED`) [E:CLAIM-049]: Implemented PostgreSQL dialect validation in `src/security/validator.ts` and explicit PostgreSQL function allowlist (`ALLOWED_FUNCTIONS_POSTGRES`) in `src/security/policy.ts`, rejecting administrative and system functions (`pg_read_file`, `pg_sleep`, `dblink`, etc.) in tests (`tests/postgres-adapter.test.ts`).
+- `CLAIM-050` (`SUPPORTED`) [E:CLAIM-050]: Created shared `QueryEngine` abstraction (`src/database/query-engine.ts`) and dynamic factory (`createQueryEngine`), allowing seamless runtime engine selection between worker-isolated SQLite and PostgreSQL pool via `MCP_SECURE_DB_ENGINE` and `DATABASE_URL`.
+
+### Findings Resolved (`docs/FINDINGS.md`)
+- `FINDING-016`: Replaced simulated read-only string execution with live `pg.Pool` connection and database-level read-only transactions.
+- `FINDING-017`: Restricted `search_path` (`SET LOCAL search_path = public, pg_temp`) to prevent schema spoofing.
+- `FINDING-018`: Added PostgreSQL dialect parsing support to `node-sql-parser` AST validator.
+- `FINDING-019`: Implemented database-level PostgreSQL role authorization with column-level grants.
