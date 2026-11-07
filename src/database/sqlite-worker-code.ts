@@ -18,6 +18,7 @@ import { DatabaseSync, constants } from "node:sqlite";
 const {
   seedSql,
   extraSeedSql,
+  sqliteDbPath,
   allowedFunctionsList,
   piiColumnsList,
   roleAllowedTables,
@@ -32,10 +33,12 @@ const ALLOWED_FUNCTIONS = new Set(allowedFunctionsList.map((f) => f.toLowerCase(
 const PII_COLUMNS = new Set(piiColumnsList.map((c) => c.toLowerCase()));
 const EXTRA_VIEWS = (extraAllowedViews || []).map((v) => v.toLowerCase());
 
-const db = new DatabaseSync(":memory:");
+const db = sqliteDbPath ? new DatabaseSync(sqliteDbPath) : new DatabaseSync(":memory:");
 
 // 1. Seed initial analytical tables (and any test views before locking writes)
-db.exec(seedSql);
+if (!sqliteDbPath) {
+  db.exec(seedSql);
+}
 if (extraSeedSql) {
   db.exec(extraSeedSql);
 }

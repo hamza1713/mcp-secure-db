@@ -13,3 +13,7 @@ coverage/
 .vitest/
 data/*.jsonl
 tests/scratch/
+*.db
+*.db-shm
+*.db-wal
+*.sqlite

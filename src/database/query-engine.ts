@@ -39,6 +39,7 @@ export interface QueryEngine {
 export interface EngineFactoryOptions {
   engineType?: "sqlite" | "postgres";
   postgresOptions?: PostgresSecureAdapterOptions;
+  sqliteDbPath?: string;
 }
 
 /**
@@ -64,6 +65,10 @@ export function createQueryEngine(options: EngineFactoryOptions = {}): QueryEngi
       connectionString,
       ...options.postgresOptions,
     });
+  }
+
+  if (options.sqliteDbPath) {
+    return new SecureDatabaseEngine({ sqliteDbPath: options.sqliteDbPath });
   }
 
   return dbEngine;

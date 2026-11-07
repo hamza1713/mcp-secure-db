@@ -1,3 +1,4 @@
+import path from "node:path";
 import { Worker } from "node:worker_threads";
 import {
   QueryExecutionResult,
@@ -8,6 +9,7 @@ import { SEED_SQL, TABLE_METADATA } from "./seed.js";
 import { SQLValidator } from "../security/validator.js";
 import {
   ALLOWED_FUNCTIONS_LIST,
+  getAllowedTablesForRole,
   PII_COLUMNS,
   ROLE_ALLOWED_TABLES,
   SQL_LIMITS,
@@ -34,6 +36,7 @@ export interface SecureDatabaseEngineOptions {
   maxYoungGenerationSizeMb?: number;
   extraSeedSql?: string;
   extraAllowedViews?: string[];
+  sqliteDbPath?: string;
 }
 
 export class SecureDatabaseEngine {
@@ -50,6 +53,7 @@ export class SecureDatabaseEngine {
   private readonly maxYoungGenerationSizeMb: number;
   private readonly extraSeedSql: string;
   private readonly extraAllowedViews: string[];
+  private readonly sqliteDbPath: string | null;
   private readonly validator: SQLValidator;
 
   constructor(optionsOrTimeoutMs: number | SecureDatabaseEngineOptions = 5000) {
@@ -70,6 +74,11 @@ export class SecureDatabaseEngine {
     this.extraAllowedViews = (opts.extraAllowedViews ?? []).map((v) =>
       v.toLowerCase()
     );
+    this.sqliteDbPath =
+      opts.sqliteDbPath ?? process.env.MCP_SECURE_DB_SQLITE_PATH ?? null;
+    if (this.sqliteDbPath && !process.env.MCP_SECURE_DB_SQLITE_PATH) {
+      process.env.MCP_SECURE_DB_SQLITE_PATH = this.sqliteDbPath;
+    }
     this.validator = new SQLValidator({
       extraAllowedViews: this.extraAllowedViews,
     });
@@ -93,13 +102,25 @@ export class SecureDatabaseEngine {
         Buffer.from(SQLITE_WORKER_MODULE_SOURCE, "utf8").toString("base64")
     );
 
+    const effectiveDbPath =
+      this.sqliteDbPath ?? process.env.MCP_SECURE_DB_SQLITE_PATH ?? null;
+    const resolvedDbPath = effectiveDbPath
+      ? path.resolve(effectiveDbPath)
+      : null;
+
     const worker = new Worker(workerUrl, {
       workerData: {
         seedSql: SEED_SQL,
         extraSeedSql: this.extraSeedSql,
+        sqliteDbPath: resolvedDbPath,
         allowedFunctionsList: [...ALLOWED_FUNCTIONS_LIST],
         piiColumnsList: [...PII_COLUMNS],
-        roleAllowedTables: ROLE_ALLOWED_TABLES,
+        roleAllowedTables: {
+          unauthenticated: [...ROLE_ALLOWED_TABLES.unauthenticated],
+          public_viewer: [...ROLE_ALLOWED_TABLES.public_viewer],
+          analyst: [...ROLE_ALLOWED_TABLES.analyst],
+          admin: [...ROLE_ALLOWED_TABLES.admin],
+        },
         extraAllowedViews: this.extraAllowedViews,
         maxPageCount: this.maxPageCount,
         maxAuthorizerOps: this.maxAuthorizerOps,
@@ -417,8 +438,9 @@ export class SecureDatabaseEngine {
 
   public getTables(role: UserRole = "unauthenticated") {
     if (role === "unauthenticated") return [];
+    const allowed = getAllowedTablesForRole(role, this.extraAllowedViews);
     return Object.values(TABLE_METADATA)
-      .filter((tbl) => role === "admin" || !tbl.adminOnly)
+      .filter((tbl) => allowed.has(tbl.name.toLowerCase()))
       .map((tbl) => ({
         name: tbl.name,
         description: tbl.description,
@@ -434,6 +456,8 @@ export class SecureDatabaseEngine {
     role: UserRole = "unauthenticated"
   ) {
     if (role === "unauthenticated") return null;
+    const allowed = getAllowedTablesForRole(role, this.extraAllowedViews);
+    if (!allowed.has(tableName.toLowerCase())) return null;
     const table = TABLE_METADATA[tableName.toLowerCase()];
     if (!table) return null;
     if (table.adminOnly && role !== "admin") return null;

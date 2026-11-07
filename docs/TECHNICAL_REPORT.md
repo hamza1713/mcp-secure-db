@@ -3,7 +3,7 @@
 > **Maturity Status**: Hardened reference implementation and proof of concept  
 > **Framework**: `mcp-use` TypeScript SDK (`2.12.2` [E:CLAIM-001])  
 > **Database Sandbox**: Worker-isolated `node:sqlite` (`Node >= 22.13.0` / Node `24` [E:CLAIM-011], [E:CLAIM-025], [E:CLAIM-026]) and PostgreSQL connection pool (`pg.Pool` [E:CLAIM-043])  
-> **Test Coverage**: 184 automated tests across 15 test suites [E:CLAIM-048]
+> **Test Coverage**: 199 automated tests across 16 test suites [E:CLAIM-048]
 
 ---
 
@@ -104,7 +104,7 @@ Query execution results are marked with `untrustedData: true` and an explicit pr
 
 ## 4. Empirical Evidence and Verification Suite
 
-The repository contains 181 automated tests across 15 test files [E:CLAIM-048]:
+The repository contains 199 automated tests across 16 test files [E:CLAIM-048]:
 
 ### 4.1 Public Bypass Corpus (`tests/bypass-corpus/`)
 A structured corpus of 32 adversarial vectors categorized across 6 attack families [E:CLAIM-039]:
@@ -181,7 +181,7 @@ The repository was evaluated against all 8 acceptance criteria:
 
 | Criterion | Requirement | Verification Command / File | Status |
 | :--- | :--- | :--- | :--- |
-| **1. Clean CI Suite** | `pnpm test`, `claims:lint`, and `deps:verify` pass on clean checkout | `pnpm test` (184 tests pass) [E:CLAIM-048] | **PASSED** |
+| **1. Clean CI Suite** | `pnpm test`, `claims:lint`, and `deps:verify` pass on clean checkout | `pnpm test` (199 tests pass) [E:CLAIM-048] | **PASSED** |
 | **2. Worker Timeout Kill** | Slow recursive CTE terminated via `worker.terminate()` in tests | `tests/sqlite-controls.test.ts` [E:CLAIM-025] | **PASSED** |
 | **3. Allowlists & Bypass Corpus** | Function/table allowlists active; 32 bypass cases fail closed | `tests/bypass-corpus.test.ts` [E:CLAIM-039] | **PASSED** |
 | **4. Differential & Fuzz Runs** | Differential testing (93 queries) and fuzzing (300 queries) pass | `tests/differential.test.ts`, `tests/fuzz.test.ts` [E:CLAIM-040], [E:CLAIM-041] | **PASSED** |

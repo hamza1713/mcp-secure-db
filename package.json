@@ -18,9 +18,13 @@
     "pg:up": "docker compose -f docker/docker-compose.postgres.yml up -d --wait",
     "pg:down": "docker compose -f docker/docker-compose.postgres.yml down -v",
     "test": "vitest run && pnpm run claims:lint && pnpm run deps:verify",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "seed:company": "tsx scripts/seed-company-db.ts",
+    "test:gemini": "tsx scripts/gemini-live-tester.ts"
   },
   "dependencies": {
+    "@google/genai": "2.32.0",
+    "dotenv": "18.0.9",
     "mcp-use": "2.12.2",
     "node-sql-parser": "5.4.0",
     "pg": "8.23.1",
@@ -33,6 +37,7 @@
     "@types/pg": "8.23.1",
     "@types/react": "19.3.0",
     "@types/react-dom": "19.3.0",
+    "tsx": "4.23.15",
     "typescript": "5.9.3",
     "vitest": "5.0.5"
   }

@@ -103,7 +103,7 @@ Authentication enforces **default-deny** [E:CLAIM-017]:
 
 ## 5. Verification and Test Suite
 
-The test suite includes 184 automated tests across 15 test files [E:CLAIM-048]:
+The test suite includes 199 automated tests across 16 test files [E:CLAIM-048]:
 
 - **Bypass Corpus (`tests/bypass-corpus/`)**: 32 structured adversarial vectors covering comment tricks, unicode, quoting, function I/O exploits, CTE mutations, and Cartesian joins [E:CLAIM-039].
 - **Differential Testing (`tests/differential.test.ts`)**: 93 queries compared across AST validator and real SQLite authorizer to confirm zero security divergences [E:CLAIM-040].
@@ -111,6 +111,7 @@ The test suite includes 184 automated tests across 15 test files [E:CLAIM-048]:
 - **Self Red-Team Pass (`tests/red-team-self.test.ts`)**: 32 adversarial test cases verifying all fail closed [E:CLAIM-042].
 - **Worker Timeout & Pragmas (`tests/sqlite-controls.test.ts`)**: Verifies hard worker-thread deadline termination on slow recursive CTEs [E:CLAIM-025].
 - **Result PII Protection (`tests/pii-bypass.test.ts`)**: 25 tests proving fail-closed blocking across views, CTEs, subqueries, aliases, and cell values [E:CLAIM-020].
+- **Company Schema & Live Gemini CLI (`tests/company-db.test.ts`)**: 15 tests verifying 5-table corporate SQLite seeding, PII guardrails (`ssn`, `salary_usd`, `personal_email`), and interactive Gemini CLI role/macro flows [E:CLAIM-051].
 - **PostgreSQL Query Engine (`tests/postgres-adapter.test.ts`, `tests/integration/`)**: Validates connection pool lifecycle, `BEGIN READ ONLY` transactions, `SET LOCAL ROLE` (`mcp_viewer`, `mcp_analyst`, `mcp_admin`), `statement_timeout`, schema allowlists, and dialect parsing [E:CLAIM-043], [E:CLAIM-049], [E:CLAIM-050].
 - **Rate Limiting & Audit (`tests/rate-limiter.test.ts`, `tests/audit.test.ts`)**: Tests per-principal rate limits, row budgets, and sensitive literal redaction [E:CLAIM-044], [E:CLAIM-045].
 - **Claims Linter (`tests/claims-lint.test.ts`)**: Enforces claims-evidence mapping in CI [E:CLAIM-037].
@@ -134,10 +135,14 @@ pnpm test
 # 5. Run reproducible validator latency benchmark
 pnpm run bench
 
-# 6. Build the server bundle
+# 6. Seed custom company SQLite database and launch interactive Gemini CLI tester
+pnpm run seed:company
+pnpm run test:gemini
+
+# 7. Build the server bundle
 pnpm run build
 
-# 7. (Optional) Run live PostgreSQL integration tests (requires Docker or local Postgres)
+# 8. (Optional) Run live PostgreSQL integration tests (requires Docker or local Postgres)
 pnpm run pg:up
 pnpm run test:integration
 pnpm run pg:down
