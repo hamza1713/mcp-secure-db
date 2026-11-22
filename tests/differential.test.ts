@@ -46,7 +46,7 @@ export const DIFFERENTIAL_CORPUS: DifferentialQueryItem[] = [
   },
   {
     id: "DIFF-SAFE-005",
-    sql: "SELECT c.name, SUM(u.request_count) AS total_reqs FROM customers c LEFT JOIN api_usage u ON c.id = u.customer_id GROUP BY c.name HAVING total_reqs > 50000 ORDER BY total_reqs DESC",
+    sql: "SELECT c.name, SUM(u.request_count) AS total_reqs FROM customers c LEFT JOIN api_usage u ON c.id = u.customer_id GROUP BY c.name HAVING SUM(u.request_count) > 50000 ORDER BY total_reqs DESC",
     role: "analyst",
     expectedOutcome: "ALLOW_AND_VERIFY_SAFE",
     category: "safe_group_having_order",
