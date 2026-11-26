@@ -35,6 +35,9 @@ jobs:
       - name: TypeScript typecheck
         run: pnpm run typecheck
 
+      - name: Build CLI (dist/cli.js is spawned by CLI and stdio tests)
+        run: pnpm run build:cli
+
       - name: Run unit tests, claims-lint, and dependency verification
         run: pnpm test
 
