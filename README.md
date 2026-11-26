@@ -16,7 +16,7 @@ Default-deny RBAC · Local AST validation · Worker-isolated SQLite · Pooled re
 
 </div>
 
-> Built with the `mcp-use` TypeScript SDK (`2.12.2` [E:CLAIM-001]), `node-sql-parser` (`5.4.0` [E:CLAIM-002]), and a worker-isolated `node:sqlite` sandbox [E:CLAIM-025] [E:CLAIM-026].
+> Built with the `mcp-use` TypeScript SDK (`2.12.2` [E:CLAIM-001]), `node-sql-parser` (`5.4.0` [E:CLAIM-002]), `libpg-query` WASM (`18.2.4` [E:CLAIM-002] [E:CLAIM-057]), and a worker-isolated `node:sqlite` sandbox [E:CLAIM-025] [E:CLAIM-026].
 > This project is a **hardened reference implementation and proof of concept**. Read [Limitations and Non-Goals](#14-limitations-and-non-goals) before adopting any part of it.
 
 ---
@@ -52,14 +52,17 @@ Default-deny RBAC · Local AST validation · Worker-isolated SQLite · Pooled re
 
 | Capability | What it provides |
 | :--- | :--- |
-| **Protocol** | MCP server on the `mcp-use` TypeScript SDK exposing 6 tools, 2 resources, and 2 prompts [E:CLAIM-008] |
-| **Engines** | Worker-isolated `node:sqlite` (default) or `pg.Pool` PostgreSQL, selected by `MCP_SECURE_DB_ENGINE` [E:CLAIM-050] |
-| **Validation** | Local, zero-LLM-token SQL validation in TypeScript [E:CLAIM-003] |
-| **Isolation** | Hard worker-thread termination on deadline, with automatic clean respawn [E:CLAIM-025] |
+| **Protocol & CLI** | MCP server (`http` and `stdio` transports via `mcp-secure-db` CLI) exposing 6 core tools, 2 resources, 2 prompts, plus dynamic parameterized template tools and `/healthz` / `/readyz` probes [E:CLAIM-008] [E:CLAIM-058] [E:CLAIM-059] |
+| **BYO-DB Policy** | Declarative `policy.yaml` / `policy.json` with live SQLite & PostgreSQL schema introspection, default-deny table allowlists, explicit + opt-in regex PII auto-taggers, and templates-only mode [E:CLAIM-056] [E:CLAIM-058] |
+| **Engines** | Worker-isolated `node:sqlite` (default) or `pg.Pool` PostgreSQL, selected by policy or `MCP_SECURE_DB_ENGINE` [E:CLAIM-050] |
+| **Validation** | Local, zero-LLM-token SQL validation (`node-sql-parser` for SQLite; official PostgreSQL 18 `libpg-query` WASM parser/lexer for PostgreSQL) [E:CLAIM-003] [E:CLAIM-057] |
+| **Isolation** | Configurable read-only SQLite worker pool (`1`–`8` workers) with per-worker hard deadline termination and clean respawn [E:CLAIM-025] [E:CLAIM-063] |
+| **Multi-tenancy** | Verified `tenantId` propagated via PostgreSQL transaction-local `set_config('app.tenant_id', $1, true)` RLS GUCs and unspoofable server-injected `:ctx.tenant_id` template bindings [E:CLAIM-062] |
 | **Data protection** | Column-level PII controls enforced at three independent points [E:CLAIM-020] |
-| **Accountability** | In-memory ring buffer plus append-only redacted JSONL audit log [E:CLAIM-045] |
+| **Accountability** | In-memory ring buffer plus tamper-evident SHA-256 / HMAC-SHA256 hash-chained JSONL audit log verifiable via `--verify-audit` [E:CLAIM-045] [E:CLAIM-060] |
+| **Observability** | Zero-dependency authenticated Prometheus `GET /metrics` endpoint and structured NDJSON `stderr` logging correlated by `requestId` [E:CLAIM-061] |
 | **Self-audit** | Claims linter and dependency-pinning verifier run in CI [E:CLAIM-037] [E:CLAIM-038] |
-| **Demo tooling** | Interactive Gemini CLI tester and seeded corporate database [E:CLAIM-051] |
+| **Demo tooling** | Reproducible 6-stage `pnpm run showcase`, interactive Gemini CLI tester, root `docker-compose.yml` stack, and 4 example policies under `examples/policies/` [E:CLAIM-051] [E:CLAIM-059] [E:CLAIM-063] |
 
 ---
 
@@ -360,11 +363,31 @@ sequenceDiagram
 
 ## 6. Authentication and Role Model
 
-Authentication enforces **default-deny** [E:CLAIM-017]:
+Authentication enforces **default-deny** [E:CLAIM-017] [E:CLAIM-053]:
 
-1. Verified OAuth access tokens (`ctx.auth` in `mcp-use` `2.12.2` [E:CLAIM-013]) are resolved first. Recognized scopes: `db:read:metadata`, `db:execute:analytics`, `db:audit:read`, `db:pii:access`.
-2. For standalone local testing, static Bearer tokens (`Authorization: Bearer <token>`) or the optional `token` tool argument are supported.
-3. Anything else resolves to `unauthenticated`.
+1. **OAuth / OIDC JWT access tokens** (enabled by `MCP_SECURE_DB_OAUTH_ISSUER`, see [6.1](#61-oauth--oidc-single-sign-on)) are verified by the `mcp-use` bearer gate (signature via JWKS, issuer, audience/resource, expiry) and mapped to a role through an operator-defined role-claim mapping [E:CLAIM-013] [E:CLAIM-064]. When OAuth is enabled, the HTTP MCP endpoint accepts **only** valid JWTs; API keys and demo tokens are refused there.
+2. Environment-configured API keys (`MCP_SECURE_DB_API_KEYS`) matched via constant-time SHA-256 comparison (`crypto.timingSafeEqual`) via `Authorization: Bearer <token>` or `x-api-key` headers [E:CLAIM-053].
+3. Static local demo tokens (`token-viewer-demo`, `token-analyst-demo`, `token-admin-demo`) are **disabled by default**, require explicit `MCP_SECURE_DB_ALLOW_DEMO_TOKENS=true`, and are always disabled when `NODE_ENV=production` [E:CLAIM-053]. Tool-argument `token` overrides are also ignored in `NODE_ENV=production`.
+4. Anything else resolves to `unauthenticated` (hiding tools, resources, and prompts on wire list/read/get calls [E:CLAIM-053]).
+
+### 6.1 OAuth / OIDC single sign-on
+
+Works with any identity provider that issues signed JWT access tokens and publishes a JWKS (Okta, Microsoft Entra ID, Auth0, Keycloak, Cognito, Google) [E:CLAIM-064]. Copy the endpoint values from your provider's `/.well-known/openid-configuration` document:
+
+| Variable | Required | Purpose |
+| :--- | :-: | :--- |
+| `MCP_SECURE_DB_OAUTH_ISSUER` | yes | Expected `iss` claim; setting it enables OAuth |
+| `MCP_SECURE_DB_OAUTH_JWKS_URL` | yes | Signing keys (`jwks_uri`) |
+| `MCP_SECURE_DB_OAUTH_AUTHORIZATION_ENDPOINT` / `MCP_SECURE_DB_OAUTH_TOKEN_ENDPOINT` | yes | Advertised to MCP clients for the login flow |
+| `MCP_SECURE_DB_OAUTH_RESOURCE_URL` | recommended | Public MCP URL, e.g. `https://db-gateway.example.com/mcp` |
+| `MCP_SECURE_DB_OAUTH_AUDIENCE` | provider-dependent | Expected `aud` when it differs from the resource URL (comma-separated) |
+| `MCP_SECURE_DB_OAUTH_ROLE_CLAIM` | no (`roles`) | Claim with IdP roles/groups; exact key (`https://acme.io/roles`) or dotted path (`realm_access.roles`) |
+| `MCP_SECURE_DB_OAUTH_ROLE_MAP` | no | JSON map of IdP values to roles, e.g. `{"db-analysts":"analyst","db-admins":"admin"}` |
+| `MCP_SECURE_DB_OAUTH_TENANT_CLAIM` | no (`tenant_id`) | Claim carrying the caller's tenant |
+| `MCP_SECURE_DB_OAUTH_ALGORITHMS` | no | Allowed JWS algorithms; asymmetric only (`HS*` and `none` are rejected) |
+| `MCP_SECURE_DB_OAUTH_TRUST_SCOPES` | no (`false`) | Also grant roles from `db:*` scopes in the token. Off by default because some IdPs let clients request any scope |
+
+Only the highest mapped role is granted; unmapped values are ignored, so a valid token with no mapped role gets `whoami` only. Incomplete or insecure OAuth settings stop the server at startup rather than running without authentication. The `stdio` transport ignores OAuth because its trust comes from the local launching process.
 
 | Credentials | Resolved Role | Allowed Tools |
 | :--- | :--- | :--- |
@@ -566,8 +589,18 @@ The image is a multi-stage `node:24-slim` build that runs as non-root `appuser` 
 
 | Variable | Default | Description |
 | :--- | :--- | :--- |
+| `MCP_SECURE_DB_POLICY_PATH` | unset (built-in demo policy) | Path to declarative `policy.yaml` or `policy.json` for BYO-DB table allowlists, PII rules, and safe templates [E:CLAIM-056] |
+| `MCP_SECURE_DB_TOKEN` | unset | Bearer or API key used to authenticate `stdio` transport requests (falls back to `--stdio-role` or default-deny) [E:CLAIM-059] |
 | `MCP_SECURE_DB_ENGINE` | `sqlite` | `sqlite` (worker-isolated) or `postgres` [E:CLAIM-050] |
-| `MCP_SECURE_DB_INSECURE_DEMO` | `false` | Allows credential-less callers to act as `public_viewer`. **Never enable on shared hosts** [E:CLAIM-017] |
+| `MCP_SECURE_DB_ALLOW_DEMO_TOKENS` | `false` | Opt-in for local `token-*-demo` credentials; always disabled under `NODE_ENV=production` [E:CLAIM-053] |
+| `MCP_SECURE_DB_API_KEYS` | unset | JSON array of API keys (`token` or 64-hex `tokenSha256`, `principal`, `role`) matched with constant-time SHA-256 [E:CLAIM-053] |
+| `MCP_SECURE_DB_INSECURE_DEMO` | `false` | Allows credential-less callers to act as `public_viewer` outside `NODE_ENV=production`. **Never enable on shared hosts** [E:CLAIM-017] |
+| `MCP_SECURE_DB_AUDIT_PATH` | `./data/audit.jsonl` | Override path for the persistent rotating hash-chained JSONL audit log [E:CLAIM-055] [E:CLAIM-060] |
+| `MCP_SECURE_DB_AUDIT_HMAC_KEY` | unset (`sha256` chain) | Optional secret key upgrading audit log chaining to keyed `HMAC-SHA256` verified by `--verify-audit` [E:CLAIM-060] |
+| `MCP_SECURE_DB_METRICS_TOKEN` | unset | Optional dedicated Bearer token for scraping `GET /metrics` (otherwise requires `admin` RBAC credentials) [E:CLAIM-061] |
+| `MCP_SECURE_DB_METRICS_PUBLIC` | `false` | Opt-in flag allowing unauthenticated `GET /metrics` scrapes inside isolated private networks [E:CLAIM-061] |
+| `MCP_SECURE_DB_LOG_FORMAT` | `json` (`off` in Vitest) | Structured NDJSON `stderr` logging (`json` or `off`) correlated via `requestId` [E:CLAIM-061] |
+| `MCP_SECURE_DB_LOG_LEVEL` | `info` | Minimum structured log level (`info`, `warn`, `error`) [E:CLAIM-061] |
 | `MCP_SECURE_DB_SQLITE_PATH` | unset (in-memory seed) | Path to a SQLite file such as the seeded `real_world_company.db` |
 | `DATABASE_URL` | see `.env.example` | PostgreSQL connection string when using the `postgres` engine |
 | `PG_TEST_URL` | see `.env.example` | PostgreSQL URL for the integration suite |
@@ -629,11 +662,90 @@ pnpm dev
 
 The PostgreSQL role setup requires least-privilege roles and column grants on the target database [E:CLAIM-043].
 
+### 11.5 Bring-Your-Own-Database via `policy.yaml`
+
+Point `mcp-secure-db` at any existing SQLite file or PostgreSQL database with a declarative YAML/JSON policy (no TypeScript edits required) [E:CLAIM-056]. The engine introspects live schemas at startup, enforces default-deny table allowlists, merges explicit PII column declarations with opt-in regex auto-taggers, and registers validated parameterized query templates as named MCP tools [E:CLAIM-056] [E:CLAIM-058]:
+
+```bash
+# Build the server + CLI binary
+pnpm run build
+
+# Validate bundled example policies (live SQLite introspection or --offline PostgreSQL AST checks)
+node dist/cli.js --validate-policy --config examples/policies/demo-saas.policy.yaml
+node dist/cli.js --validate-policy --config examples/policies/company-sqlite.policy.yaml
+node dist/cli.js --validate-policy --offline --config examples/policies/postgres-templates-only.policy.yaml
+
+# Run HTTP gateway with a custom policy
+node dist/cli.js --config examples/policies/demo-saas.policy.yaml --transport http --port 8000
+```
+
+Set `adhoc_sql.enabled: false` in `policy.yaml` to hide `execute_analytical_sql` and `verify_query_safety` and restrict callers exclusively to pre-approved parameterized templates (`examples/policies/postgres-templates-only.policy.yaml`) [E:CLAIM-058]. Plaintext database passwords and `connection_string` keys are rejected by schema validation; reference credentials via `connection_string_env` [E:CLAIM-056].
+
+### 11.6 IDE integration via `stdio` (Claude Desktop / Cursor)
+
+Run the packaged CLI over clean newline-delimited JSON-RPC `stdio` (diagnostics go to `stderr`; authentication remains default-deny unless `MCP_SECURE_DB_TOKEN` or an explicit `--stdio-role` is configured) [E:CLAIM-059]:
+
+```json
+{
+  "mcpServers": {
+    "mcp-secure-db": {
+      "command": "node",
+      "args": [
+        "./dist/cli.js",
+        "--transport", "stdio",
+        "--config", "./examples/policies/demo-saas.policy.yaml",
+        "--stdio-role", "analyst"
+      ]
+    }
+  }
+}
+```
+
+To authenticate `stdio` against `MCP_SECURE_DB_API_KEYS` instead of `--stdio-role`, omit `--stdio-role` and pass `"env": { "MCP_SECURE_DB_TOKEN": "...", "MCP_SECURE_DB_API_KEYS": "[...]" }` [E:CLAIM-059].
+
+### 11.7 Operational probes & Prometheus metrics
+
+In HTTP mode, operational endpoints provide liveness, readiness, and zero-dependency Prometheus observability without leaking table or column metadata [E:CLAIM-059] [E:CLAIM-061]:
+
+- `GET /healthz` — unauthenticated process liveness (`200 OK`).
+- `GET /readyz` — unauthenticated engine readiness check (`200 OK` when ready, `503 Service Unavailable` when degraded; includes SQLite worker pool counts when applicable).
+- `GET /metrics` — authenticated Prometheus text exposition (`401`/`403` unless caller supplies `admin` credentials, `MCP_SECURE_DB_METRICS_TOKEN`, or explicit `MCP_SECURE_DB_METRICS_PUBLIC=true`), reporting low-cardinality request/block counters, AST & execution latency histograms, worker terminations, and audit chain sequence [E:CLAIM-061].
+
+### 11.8 Tamper-evident audit verification & 60-second showcase
+
+```bash
+# Verify SHA-256 or HMAC-SHA256 hash chain of an audit JSONL file (exits 0 intact, 1 tampered)
+node dist/cli.js --verify-audit ./data/audit.jsonl
+
+# Run the self-contained 6-stage security showcase (no API key or Docker required)
+pnpm run showcase
+```
+
+### 11.9 Multi-tenant isolation & one-command Docker Compose stack
+
+- **Server-injected template bindings:** Reference `:ctx.tenant_id`, `:ctx.principal`, or `:ctx.role` inside template SQL (see `examples/policies/multi-tenant-saas.policy.yaml`). Context placeholders are omitted from LLM tool schemas and bound solely from verified OAuth claims, `MCP_SECURE_DB_API_KEYS`, or trusted CLI `--stdio-tenant` [E:CLAIM-062].
+- **PostgreSQL native RLS:** When `tenant_isolation.enabled: true` (or a verified `tenantId` is present), `PostgresQueryEngine` injects parameterized transaction-local `SELECT set_config('app.tenant_id', $1, true)` before `SET LOCAL ROLE` (paired with `docker/postgres/init/03-rls.sql`) [E:CLAIM-062].
+- **Full Compose stack:** Boot PostgreSQL 17 (with schema, least-privilege roles, and `03-rls.sql`) alongside the containerized `mcp-secure-db` gateway in one command [E:CLAIM-063]:
+
+```bash
+docker compose up --build -d
+curl -s http://127.0.0.1:8000/readyz
+docker compose down -v
+```
+
 ---
 
 ## 12. Verification, Testing, and CI
 
-The test suite includes 199 automated tests across 16 test files [E:CLAIM-048]:
+The test suite includes 313 automated tests across 24 test files [E:CLAIM-048]:
+
+- **Phase 3 Tamper-Evident Audit & Observability (`tests/phase3-audit-and-observability.test.ts`)**: Verifies SHA-256 and keyed HMAC-SHA256 hash-chaining, restart resumption, `ROTATION_ANCHOR` segment linking, tamper detection (1-byte edits, deletions, reordering, unsigned lines), CLI `--verify-audit` exit codes, authenticated `GET /metrics` (`401`/`403`/`200`), and `requestId` structured NDJSON correlation [E:CLAIM-060] [E:CLAIM-061].
+- **Phase 3 Multi-Tenant Isolation & RLS (`tests/phase3-multi-tenant-rls.test.ts`)**: Verifies `tenantId` extraction from OAuth claims, API keys, and `--stdio-tenant`, unspoofable `:ctx.tenant_id` template scoping, `require_tenant_id` fail-closed enforcement, and parameterized PostgreSQL `set_config('app.tenant_id', $1, true)` injection before `SET LOCAL ROLE` [E:CLAIM-062].
+- **Phase 3 SQLite Worker Pool & Showcase (`tests/phase3-worker-pool-and-showcase.test.ts`)**: Verifies concurrent multi-worker SQLite execution with per-worker fault isolation (killing a runaway recursive CTE on one worker while a sibling worker completes cleanly), `--validate-policy` on `multi-tenant-saas.policy.yaml`, and end-to-end execution of the 6-stage `scripts/security-showcase.ts` runner [E:CLAIM-063].
+- **Phase 2 Declarative Policy & Live Introspection (`tests/phase2-policy-introspection.test.ts`)**: Verifies Zod policy validation (rejecting plaintext secrets, ReDoS regexes, and tool-name collisions), live SQLite `sqlite_master`/`PRAGMA table_info` schema introspection on arbitrary BYO databases, default-deny tables, and explicit + regex PII auto-tagging [E:CLAIM-056].
+- **Phase 2 Official PostgreSQL WASM AST Validator (`tests/phase2-libpg-query.test.ts`)**: 41 tests verifying `libpg-query` 18.2.4 (`parseSync` + `scanSync`) across 10 legitimate PostgreSQL analytical queries (including `EXTRACT`, `date_trunc`, `FETCH FIRST`, `LIMIT 0`, `::` casts) and 31 adversarial PostgreSQL attack vectors (`DO $$`, `COPY TO PROGRAM`, `SELECT ... FOR UPDATE`, data-modifying CTEs, `RangeFunction`, `SQLValueFunction`, comment smuggling, and `_mcp_bounded` limit wrapping) [E:CLAIM-057].
+- **Phase 2 Parameterized Templates, Probes & Stdio CLI (`tests/phase2-templates-and-stdio.test.ts`)**: Verifies native parameter binding against SQLi payloads, fail-fast template AST validation, `adhoc_sql.enabled: false` templates-only lockdown, `/healthz` and `/readyz` probes, `--validate-policy` on all 3 example policies, and real child-process `stdio` JSON-RPC framing with default-deny, `--stdio-role`, and `MCP_SECURE_DB_TOKEN` auth [E:CLAIM-058] [E:CLAIM-059].
+- **Phase 1 Security Hardening Suite (`tests/phase1-hardening.test.ts`)**: 38 adversarial regression tests verifying closure of PostgreSQL AST clauses (`WINDOW`, `FILTER`, `DISTINCT ON`, aggregate `ORDER BY`), `LIMIT offset, count` and `OFFSET` bounds, cross-relation join predicates, constant-time RBAC & prototype safety, 6-method MCP wire RBAC, atomic rate limiting, read-only SQLite open, duplicate column disambiguation, and audit/result policy fixes [E:CLAIM-052] [E:CLAIM-053] [E:CLAIM-054] [E:CLAIM-055].
 
 - **Bypass Corpus (`tests/bypass-corpus/`)**: 32 structured adversarial vectors covering comment tricks, unicode, quoting, function I/O exploits, CTE mutations, and Cartesian joins [E:CLAIM-039].
 - **Differential Testing (`tests/differential.test.ts`)**: 93 queries compared across AST validator and real SQLite authorizer to confirm zero security divergences [E:CLAIM-040].
@@ -694,7 +806,8 @@ End-to-end latency also includes worker IPC, SQLite execution, result scanning, 
 - **Does not stop downstream prompt injection:** The validator, SQLite authorizer, and worker sandbox limit what SQL operations an injected instruction can execute; they do **not** stop a prompt-injected agent from reading data its authenticated role is permitted to access. Response data is tagged with `untrustedData: true` to assist calling models [E:CLAIM-046].
 - **Inference and aggregation on permitted columns:** Statistical or multi-query inference over non-PII columns that a role is allowed to query remains possible.
 - **`node:sqlite` experimental status:** Built-in `node:sqlite` emits an `ExperimentalWarning` in Node.js and may evolve across Node releases.
-- **Single serialized SQLite worker:** SQLite queries run one at a time through one worker. For concurrent multi-tenant workloads use the PostgreSQL engine [E:CLAIM-050].
+- **SQLite worker pool scope:** SQLite runs in a small read-only worker pool (`engine.worker_pool_size` 1–8) [E:CLAIM-063]. For concurrent multi-tenant workloads use the PostgreSQL engine [E:CLAIM-050].
+- **Single-instance rate limits:** Rate limits and row budgets are held in process memory, so they reset on restart and are not shared across replicas [E:CLAIM-044].
 - **Demo dataset scope:** Default execution runs against 4 seeded in-memory SQLite tables [E:CLAIM-009] and is not evidence of production behavior against external cloud data warehouses.
 - **Static demo tokens:** The `token-*-demo` credentials are for local testing only. Use verified OAuth in any shared deployment [E:CLAIM-013].
 - **In-memory audit buffer durability:** The 100-entry ring buffer is an in-memory debugging cache and is not durable across process restarts [E:CLAIM-027]. A persistent append-only log is written to `data/audit.jsonl` [E:CLAIM-045].
@@ -710,32 +823,46 @@ End-to-end latency also includes worker IPC, SQLite execution, result scanning, 
 ```
 mcp-secure-db/
 ├── src/
-│   ├── index.ts                    # MCP server: tools, resources, prompts, middleware
+│   ├── index.ts                    # MCP server factory: tools, templates, middleware, probes
+│   ├── cli.ts                      # Packaged CLI (http/stdio transports, --validate-policy)
 │   ├── types.ts                    # Shared role, context, and result types
+│   ├── policy/
+│   │   ├── schema.ts               # Strict Zod schemas for declarative policy.yaml/.json
+│   │   └── loader.ts               # Policy loader, default demo builder, regex PII classifier
 │   ├── security/
-│   │   ├── rbac.ts                 # Default-deny RBAC, OAuth scope and token resolution
-│   │   ├── validator.ts            # Lexical scanner + recursive AST validator
+│   │   ├── rbac.ts                 # Default-deny RBAC, OAuth, API key, and stdio auth
+│   │   ├── validator.ts            # SQLite lexical scanner + recursive AST validator
+│   │   ├── pg-ast-validator.ts     # Official PostgreSQL 18 WASM AST validator (libpg-query)
+│   │   ├── template-engine.ts      # Named :param template compiler & startup AST validator
 │   │   ├── policy.ts               # Allowlists, limits, role/table/PII policy
 │   │   ├── result-policy.ts        # Result-level PII scanning
 │   │   └── rate-limiter.ts         # Sliding-window query and row budgets
+│   ├── observability/
+│   │   ├── metrics.ts              # Zero-dependency Prometheus /metrics registry
+│   │   └── logger.ts               # Structured NDJSON stderr logger + requestId correlation
 │   └── database/
 │       ├── query-engine.ts         # QueryEngine interface + createQueryEngine()
-│       ├── engine.ts               # Worker-isolated SQLite engine
-│       ├── sqlite-worker-code.ts   # Worker module: pragmas, authorizer, execution
-│       ├── postgres-adapter.ts     # pg.Pool read-only PostgreSQL engine
-│       ├── audit.ts                # Ring buffer + redacted JSONL audit log
+│       ├── engine.ts               # Configurable SQLite worker pool (1-8) + live introspection
+│       ├── sqlite-worker-code.ts   # Worker module: introspection, pragmas, authorizer
+│       ├── postgres-adapter.ts     # pg.Pool read-only PostgreSQL engine + RLS GUC injection
+│       ├── audit.ts                # Ring buffer + SHA-256/HMAC-SHA256 hash-chained JSONL audit
 │       └── seed.ts                 # Demo and company seed schemas
+├── examples/
+│   └── policies/                   # Example YAML policies (demo, SQLite BYO-DB, PG templates-only, multi-tenant)
 ├── scripts/
+│   ├── security-showcase.ts        # Self-contained 6-stage verification & security showcase
 │   ├── gemini-live-tester.ts       # Interactive Gemini CLI tester
 │   ├── seed-company-db.ts          # Corporate SQLite database seeder
 │   ├── claims-lint.ts              # Claims-to-evidence linter
 │   └── verify-deps.ts              # Dependency pinning verifier
-├── tests/                          # Vitest suites, bypass corpus, integration tests
+├── tests/                          # Vitest suites, Phase 1/2/3 hardening, bypass corpus, integration
 ├── bench/                          # Reproducible validator benchmark
-├── docker/                         # PostgreSQL compose file, schema, and role scripts
+├── docker/                         # PostgreSQL compose file, schema, role, and RLS (03-rls.sql) scripts
+├── docker-compose.yml              # One-command full-stack gateway + PostgreSQL 17 Compose stack
 ├── docs/                           # Threat model, claims ledger, reports
 ├── .github/workflows/ci.yml        # CI pipeline
 ├── Dockerfile                      # Multi-stage, non-root image
+├── tsconfig.build.json             # CLI TypeScript build config (dist/)
 └── package.json
 ```
 
@@ -763,11 +890,10 @@ mcp-secure-db/
 
 ## 17. Roadmap
 
-- Multi-worker SQLite pool with per-worker deadlines.
-- Persistent, tamper-evident audit sink (hash-chained or external).
-- Additional dialects and warehouse adapters behind the `QueryEngine` interface.
+- External SIEM / immutable remote audit sink forwarding (building on the local SHA-256 / HMAC-SHA256 hash-chained log [E:CLAIM-060]).
+- Additional SQL dialects and cloud warehouse adapters (MySQL, Snowflake, BigQuery) behind the `QueryEngine` interface.
+- Live policy hot-reload with atomic startup validation rollback.
 - Independent third-party security review.
-- Optional per-tenant row-level policies.
 
 Roadmap items are intentions, not commitments, and carry no delivery claim.
 

@@ -127,13 +127,15 @@ describe("Multi-Layer Fail-Closed PII Bypass Defenses (P0-5)", () => {
       ).toThrow(SecurityResultPolicyViolation);
     });
 
-    it("fails closed when synthetic rows contain Stripe customer IDs, webhook secrets, API keys, or IPs", () => {
+    it("fails closed when synthetic rows contain Stripe customer IDs, webhook secrets, API keys, SSNs, JWTs, or IPs", () => {
       const payloads = [
         "cus_9921_acme",
         "whsec_987216345abcdef",
         "pk_live_acme_9281",
         "198.51.100.44",
-        "BILLING@ACME",
+        "982-41-1029",
+        "stripe_mock_secret_998124018274",
+        "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U",
       ];
 
       for (const value of payloads) {
@@ -145,6 +147,16 @@ describe("Multi-Layer Fail-Closed PII Bypass Defenses (P0-5)", () => {
           })
         ).toThrow(SecurityResultPolicyViolation);
       }
+
+      // Caller-supplied sensitive substrings also fail closed case-insensitively
+      expect(() =>
+        enforceResultPolicy({
+          role: "analyst",
+          columns: ["computed_value"],
+          rows: [{ computed_value: "BILLING@ACME" }],
+          extraSensitiveSubstrings: ["billing@acme"],
+        })
+      ).toThrow(SecurityResultPolicyViolation);
     });
 
     it("permits admin role to receive PII columns and values", () => {

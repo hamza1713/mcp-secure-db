@@ -1,0 +1,92 @@
+# Multi-Tenant Zero-Trust Policy Example
+# Demonstrates:
+#   - Configurable read-only SQLite worker pool (worker_pool_size: 2)
+#   - Mandatory tenant isolation for non-admin callers (require_tenant_id: true)
+#   - Unspoofable server-injected `:ctx.tenant_id` template binding (omitted from LLM tool schema)
+#
+# Validate with:
+#   node dist/cli.js --validate-policy --config examples/policies/multi-tenant-saas.policy.yaml
+#
+# Test over stdio:
+#   node dist/cli.js --transport stdio --config examples/policies/multi-tenant-saas.policy.yaml --stdio-role analyst --stdio-tenant enterprise
+
+version: 1
+
+engine:
+  type: sqlite
+  statement_timeout_ms: 5000
+  worker_pool_size: 2
+
+tenant_isolation:
+  enabled: true
+  require_tenant_id: true
+  pg_tenant_setting: app.tenant_id
+  pg_principal_setting: app.principal
+
+adhoc_sql:
+  enabled: true
+  allowed_roles:
+    - analyst
+    - admin
+  default_limit: 50
+  max_rows: 500
+  max_offset: 5000
+
+roles:
+  public_viewer:
+    tables:
+      - customers
+      - api_usage
+  analyst:
+    tables:
+      - customers
+      - api_usage
+    rate_limit:
+      max_queries_per_minute: 60
+      max_rows_per_hour: 10000
+  admin:
+    tables:
+      - customers
+      - api_usage
+      - security_incidents
+      - api_keys
+    allow_pii: true
+
+pii:
+  columns:
+    customers:
+      - billing_email
+      - stripe_customer_id
+    api_keys:
+      - webhook_secret
+    security_incidents:
+      - client_ip
+  auto_tag_patterns:
+    - "(?:^|_)(?:email|ssn|secret|token|password|stripe_customer_id|client_ip)(?:$|_)"
+
+templates:
+  - name: tenant_usage_summary
+    description: Summarize API requests and compute duration scoped strictly to the caller's verified tenant context
+    allowed_roles:
+      - public_viewer
+      - analyst
+      - admin
+    sql: |
+      SELECT c.id, c.name, c.plan,
+             SUM(u.request_count) AS total_requests,
+             SUM(u.compute_ms) AS total_compute_ms
+      FROM customers c
+      JOIN api_usage u ON c.id = u.customer_id
+      WHERE c.plan = :ctx.tenant_id
+        AND u.request_count >= :min_requests
+      GROUP BY c.id, c.name, c.plan
+      ORDER BY total_compute_ms DESC
+      LIMIT 50
+    parameters:
+      min_requests:
+        type: integer
+        description: Minimum per-row request count threshold
+        required: false
+        default: 0
+        min: 0
+        max: 10000000

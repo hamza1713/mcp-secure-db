@@ -4,12 +4,14 @@
  *
  * Loaded via `data:text/javascript;base64,...` so it executes identically under
  * Vitest, `node --experimental-strip-types`, `mcp-use dev`, `mcp-use build`,
- * and container builds without bundler path assumptions.
+ * `dist/cli.js`, and container builds without bundler path assumptions.
  *
- * Note on `node:sqlite` stability: `node:sqlite` is marked experimental / release
- * candidate in Node 22.13+ and Node 24. To avoid reported authorizer reentrancy
- * issues, the `setAuthorizer` callback performs pure in-memory Set and counter
- * checks and never invokes `DatabaseSync` methods recursively.
+ * Lifecycle:
+ * 1. Open `:memory:` (seeded) or file-backed SQLite (`{ readOnly: true }`).
+ * 2. Run trusted pre-authorizer schema introspection (`sqlite_master` + `PRAGMA table_info`)
+ *    for configured relations and compile explicit + regex-auto-tagged per-table PII rules.
+ * 3. Apply SQLite untrusted-SQL hardening pragmas and install non-reentrant `setAuthorizer`.
+ * 4. Emit `{ type: "ready", introspectedTables }` to parent thread.
  */
 export const SQLITE_WORKER_MODULE_SOURCE = `
 import { parentPort, workerData } from "node:worker_threads";
@@ -21,6 +23,8 @@ const {
   sqliteDbPath,
   allowedFunctionsList,
   piiColumnsList,
+  piiColumnsByTable,
+  piiAutoTagPatterns,
   roleAllowedTables,
   extraAllowedViews,
   maxPageCount,
@@ -30,10 +34,20 @@ const {
 } = workerData;
 
 const ALLOWED_FUNCTIONS = new Set(allowedFunctionsList.map((f) => f.toLowerCase()));
-const PII_COLUMNS = new Set(piiColumnsList.map((c) => c.toLowerCase()));
+const PII_COLUMNS = new Set((piiColumnsList || []).map((c) => c.toLowerCase()));
+const TABLE_PII_MAP = new Map();
+if (piiColumnsByTable && typeof piiColumnsByTable === "object") {
+  for (const [tbl, cols] of Object.entries(piiColumnsByTable)) {
+    TABLE_PII_MAP.set(tbl.toLowerCase(), new Set((cols || []).map((c) => c.toLowerCase())));
+  }
+}
+const AUTO_TAG_REGEXES = (piiAutoTagPatterns || []).map((pat) => new RegExp(pat, "i"));
 const EXTRA_VIEWS = (extraAllowedViews || []).map((v) => v.toLowerCase());
 
-const db = sqliteDbPath ? new DatabaseSync(sqliteDbPath) : new DatabaseSync(":memory:");
+const openReadOnly = Boolean(sqliteDbPath && !extraSeedSql);
+const db = sqliteDbPath
+  ? new DatabaseSync(sqliteDbPath, openReadOnly ? { readOnly: true } : undefined)
+  : new DatabaseSync(":memory:");
 
 // 1. Seed initial analytical tables (and any test views before locking writes)
 if (!sqliteDbPath) {
@@ -43,7 +57,76 @@ if (extraSeedSql) {
   db.exec(extraSeedSql);
 }
 
-// 2. Apply SQLite recommended hardening controls for untrusted SQL
+// 2. Trusted startup schema introspection BEFORE installing setAuthorizer
+function quoteIdent(name) {
+  return '"' + String(name).replace(/"/g, '""') + '"';
+}
+
+const allConfiguredTables = new Set();
+for (const roleKey of ["public_viewer", "analyst", "admin"]) {
+  for (const tbl of (roleAllowedTables[roleKey] || [])) {
+    allConfiguredTables.add(String(tbl).toLowerCase());
+  }
+}
+for (const viewName of EXTRA_VIEWS) {
+  allConfiguredTables.add(viewName);
+}
+
+const introspectedTables = [];
+try {
+  const rawObjects = db
+    .prepare(
+      "SELECT name, type FROM sqlite_master WHERE type IN ('table', 'view') AND name NOT LIKE 'sqlite_%' ORDER BY name"
+    )
+    .all();
+
+  for (const obj of rawObjects) {
+    const rawName = String(obj.name || "");
+    const lowerName = rawName.toLowerCase();
+    if (!lowerName) continue;
+    if (allConfiguredTables.size > 0 && !allConfiguredTables.has(lowerName)) {
+      continue;
+    }
+
+    const colRows = db.prepare(\`PRAGMA table_info(\${quoteIdent(rawName)})\`).all();
+    const columns = colRows.map((c) => ({
+      name: String(c.name || ""),
+      type: String(c.type || "TEXT"),
+    }));
+
+    // Merge regex-auto-tagged PII columns into worker-side authorizer enforcement
+    let tblPiiSet = TABLE_PII_MAP.get(lowerName);
+    for (const col of columns) {
+      const lowerCol = col.name.toLowerCase();
+      if (AUTO_TAG_REGEXES.some((re) => re.test(lowerCol))) {
+        if (!tblPiiSet) {
+          tblPiiSet = new Set();
+          TABLE_PII_MAP.set(lowerName, tblPiiSet);
+        }
+        tblPiiSet.add(lowerCol);
+        PII_COLUMNS.add(lowerCol);
+      }
+    }
+
+    let rowCount = 0;
+    try {
+      const cntRow = db.prepare(\`SELECT COUNT(*) AS cnt FROM \${quoteIdent(rawName)}\`).get();
+      rowCount = Number(cntRow?.cnt ?? 0);
+    } catch {
+      rowCount = 0;
+    }
+
+    introspectedTables.push({
+      name: lowerName,
+      rowCount,
+      columns,
+    });
+  }
+} catch {
+  // Non-fatal fallback if introspection is unavailable
+}
+
+// 3. Apply SQLite recommended hardening controls for untrusted SQL
 db.enableLoadExtension(false);
 db.enableDefensive(true);
 db.exec(\`
@@ -55,7 +138,7 @@ db.exec(\`
   PRAGMA query_only = ON;
 \`);
 
-// 3. Read back active pragma state before installing the compile-time authorizer
+// 4. Read back active pragma state before installing the compile-time authorizer
 const queryOnlyPragma = Number(db.prepare("PRAGMA query_only").get()?.query_only ?? 0);
 const trustedSchemaPragma = Number(db.prepare("PRAGMA trusted_schema").get()?.trusted_schema ?? 1);
 const cellSizeCheckPragma = Number(db.prepare("PRAGMA cell_size_check").get()?.cell_size_check ?? 0);
@@ -69,19 +152,51 @@ try {
   loadExtensionDisabled = true;
 }
 
-// Verify defensive mode blocks writable_schema tampering
-let defensiveMode = true;
+// Actively verify defensive mode blocks PRAGMA writable_schema = ON
+let defensiveMode = false;
 try {
   db.exec("PRAGMA writable_schema = ON;");
   const ws = Number(db.prepare("PRAGMA writable_schema").get()?.writable_schema ?? 0);
   if (ws === 1) {
     db.exec("PRAGMA writable_schema = OFF;");
+    defensiveMode = false;
+  } else {
+    defensiveMode = true;
   }
 } catch {
   defensiveMode = true;
 }
 
-// 4. Active per-statement policy state read by the non-reentrant authorizer callback
+function disambiguateColumnNames(rawColumns) {
+  const seen = new Set();
+  const result = [];
+  for (let i = 0; i < rawColumns.length; i++) {
+    const base = rawColumns[i] || \`col_\${i + 1}\`;
+    if (!seen.has(base)) {
+      seen.add(base);
+      result.push(base);
+      continue;
+    }
+    let suffix = 2;
+    let candidate = \`\${base}_\${suffix}\`;
+    while (seen.has(candidate)) {
+      suffix += 1;
+      candidate = \`\${base}_\${suffix}\`;
+    }
+    seen.add(candidate);
+    result.push(candidate);
+  }
+  return result;
+}
+
+function isPiiColumnForTable(tableName, columnName) {
+  if (!columnName) return false;
+  const tblSet = TABLE_PII_MAP.get(tableName);
+  if (tblSet && tblSet.has(columnName)) return true;
+  return PII_COLUMNS.has(columnName);
+}
+
+// 5. Active per-statement policy state read by the non-reentrant authorizer callback
 let activePolicy = {
   role: "unauthenticated",
   allowedTables: new Set(),
@@ -132,7 +247,7 @@ db.setAuthorizer((actionCode, arg1, arg2, dbName, _triggerOrView) => {
       return constants.SQLITE_DENY;
     }
 
-    if (activePolicy.role !== "admin" && columnName && PII_COLUMNS.has(columnName)) {
+    if (activePolicy.role !== "admin" && isPiiColumnForTable(tableName, columnName)) {
       activePolicy.deniedReason = \`SQLite authorizer denied PII column '\${tableName}.\${columnName}' for role '\${activePolicy.role}'\`;
       return constants.SQLITE_DENY;
     }
@@ -155,7 +270,7 @@ function buildAllowedTableSet(role) {
   return new Set([...base.map((t) => t.toLowerCase()), ...EXTRA_VIEWS]);
 }
 
-function runQuery(sql, role, rowCap) {
+function runQuery(sql, role, rowCap, params) {
   activePolicy = {
     role,
     allowedTables: buildAllowedTableSet(role),
@@ -166,25 +281,56 @@ function runQuery(sql, role, rowCap) {
   try {
     const stmt = db.prepare(sql);
     const colMeta = typeof stmt.columns === "function" ? stmt.columns() : [];
-    const columns = colMeta.map((c) => String(c.name));
+    const rawColumns = colMeta.map((c) => String(c.name));
+    const columns = disambiguateColumnNames(rawColumns);
 
     // Additional origin-column check via StatementSync.columns() metadata
     if (role !== "admin") {
       for (const c of colMeta) {
+        const originTbl = c.table ? String(c.table).toLowerCase() : "";
         const originCol = c.column ? String(c.column).toLowerCase() : "";
-        if (originCol && PII_COLUMNS.has(originCol)) {
+        if (originCol && isPiiColumnForTable(originTbl, originCol)) {
           throw new Error(
-            \`Origin column '\${c.table || "?"}.\${originCol}' is restricted PII for role '\${role}'\`
+            \`Origin column '\${originTbl || "?"}.\${originCol}' is restricted PII for role '\${role}'\`
           );
         }
       }
     }
 
-    const effectiveCap = Math.min(Number(rowCap || maxRows), maxRows);
+    const numericCap =
+      rowCap === undefined || rowCap === null ? maxRows : Number(rowCap);
+    const effectiveCap = Math.min(
+      Math.max(0, Number.isFinite(numericCap) ? numericCap : maxRows),
+      maxRows
+    );
+
+    if (effectiveCap === 0) {
+      return {
+        ok: true,
+        columns,
+        rows: [],
+        authorizerOperations: activePolicy.opCount,
+      };
+    }
+
+    const useArrayMode = typeof stmt.setReturnArrays === "function";
+    if (useArrayMode) {
+      stmt.setReturnArrays(true);
+    }
+
+    const bindParams = Array.isArray(params) ? params : [];
+    const iterator = bindParams.length > 0 ? stmt.iterate(...bindParams) : stmt.iterate();
     const rows = [];
-    for (const row of stmt.iterate()) {
-      const plainObj = Object.assign({}, row);
-      rows.push(plainObj);
+    for (const row of iterator) {
+      if (useArrayMode && Array.isArray(row)) {
+        const plainObj = {};
+        for (let i = 0; i < columns.length; i++) {
+          plainObj[columns[i]] = row[i];
+        }
+        rows.push(plainObj);
+      } else {
+        rows.push(Object.assign({}, row));
+      }
       if (rows.length >= effectiveCap) {
         break;
       }
@@ -219,6 +365,11 @@ function runQuery(sql, role, rowCap) {
 parentPort.on("message", (msg) => {
   if (!msg || typeof msg !== "object") return;
 
+  if (msg.type === "ping") {
+    parentPort.postMessage({ id: msg.id, ok: true });
+    return;
+  }
+
   if (msg.type === "inspect_controls") {
     parentPort.postMessage({
       id: msg.id,
@@ -226,6 +377,7 @@ parentPort.on("message", (msg) => {
       controls: {
         engine: "SQLite (node:sqlite DatabaseSync in worker_threads)",
         workerThread: true,
+        readOnlyOpen: openReadOnly,
         defensiveMode,
         loadExtensionDisabled,
         queryOnlyPragma,
@@ -241,7 +393,7 @@ parentPort.on("message", (msg) => {
   }
 
   if (msg.type === "query") {
-    const res = runQuery(msg.sql, msg.role, msg.rowCap);
+    const res = runQuery(msg.sql, msg.role, msg.rowCap, msg.params);
     parentPort.postMessage({
       id: msg.id,
       ...res,
@@ -250,5 +402,5 @@ parentPort.on("message", (msg) => {
   }
 });
 
-parentPort.postMessage({ type: "ready" });
+parentPort.postMessage({ type: "ready", introspectedTables });
 `;

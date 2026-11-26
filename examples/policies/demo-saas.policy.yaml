@@ -1,0 +1,78 @@
+# Example declarative policy for the built-in 4-table SaaS demo SQLite database
+version: 1
+
+engine:
+  type: sqlite
+  statement_timeout_ms: 5000
+
+adhoc_sql:
+  enabled: true
+  allowed_roles: [analyst, admin]
+  default_limit: 100
+  max_rows: 1000
+  max_offset: 10000
+
+roles:
+  public_viewer:
+    tables: [customers, api_usage]
+    rate_limit:
+      max_queries_per_minute: 30
+      max_rows_per_hour: 2000
+  analyst:
+    tables: [customers, api_usage]
+    rate_limit:
+      max_queries_per_minute: 60
+      max_rows_per_hour: 10000
+  admin:
+    tables: [customers, api_usage, security_incidents, api_keys]
+    allow_pii: true
+    rate_limit:
+      max_queries_per_minute: 120
+      max_rows_per_hour: 50000
+
+pii:
+  columns:
+    customers: [billing_email, stripe_customer_id]
+    security_incidents: [client_ip]
+    api_keys: [webhook_secret]
+
+templates:
+  - name: get_customer_usage_summary
+    description: "Summarize API requests and compute duration for customers on a given subscription plan"
+    allowed_roles: [public_viewer, analyst, admin]
+    sql: >-
+      SELECT c.id, c.name, c.plan,
+             SUM(u.request_count) AS total_requests,
+             SUM(u.compute_ms) AS total_compute_ms
+      FROM customers c
+      JOIN api_usage u ON c.id = u.customer_id
+      WHERE c.plan = :plan
+      GROUP BY c.id, c.name, c.plan
+      ORDER BY total_compute_ms DESC
+      LIMIT 50
+    parameters:
+      plan:
+        type: string
+        description: "Subscription plan tier to filter by"
+        enum: [starter, pro, enterprise]
+        default: enterprise
+
+  - name: top_endpoints_by_compute
+    description: "Rank API endpoints by aggregate compute milliseconds above a minimum request threshold"
+    allowed_roles: [public_viewer, analyst, admin]
+    sql: >-
+      SELECT endpoint,
+             SUM(request_count) AS total_requests,
+             SUM(compute_ms) AS total_compute_ms
+      FROM api_usage
+      WHERE request_count >= :min_requests
+      GROUP BY endpoint
+      ORDER BY total_compute_ms DESC
+      LIMIT 20
+    parameters:
+      min_requests:
+        type: integer
+        description: "Minimum per-row request count threshold"
+        min: 0
+        max: 10000000
+        default: 0

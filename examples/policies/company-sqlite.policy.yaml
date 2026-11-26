@@ -1,0 +1,75 @@
+# Example declarative policy for the seeded corporate SQLite database (real_world_company.db)
+# Run `pnpm run seed:company` first if real_world_company.db has not been generated yet.
+version: 1
+
+engine:
+  type: sqlite
+  sqlite_path: ../../real_world_company.db
+  statement_timeout_ms: 5000
+
+adhoc_sql:
+  enabled: true
+  allowed_roles: [analyst, admin]
+  default_limit: 100
+  max_rows: 1000
+  max_offset: 10000
+
+roles:
+  public_viewer:
+    tables: [departments, products]
+    rate_limit:
+      max_queries_per_minute: 30
+      max_rows_per_hour: 2000
+  analyst:
+    tables: [departments, products, orders, employees]
+    rate_limit:
+      max_queries_per_minute: 60
+      max_rows_per_hour: 10000
+  admin:
+    tables: [departments, products, orders, employees, api_secrets]
+    allow_pii: true
+    rate_limit:
+      max_queries_per_minute: 120
+      max_rows_per_hour: 50000
+
+pii:
+  columns:
+    employees: [salary_usd, ssn, personal_email]
+    api_secrets: [secret_token]
+
+templates:
+  - name: revenue_by_product
+    description: "Aggregate order count and USD revenue by product filtered by fulfillment status"
+    allowed_roles: [analyst, admin]
+    sql: >-
+      SELECT p.sku, p.title,
+             COUNT(o.id) AS order_count,
+             SUM(o.amount_usd) AS total_revenue_usd
+      FROM products p
+      JOIN orders o ON p.id = o.product_id
+      WHERE o.status = :order_status
+      GROUP BY p.sku, p.title
+      ORDER BY total_revenue_usd DESC
+      LIMIT 25
+    parameters:
+      order_status:
+        type: string
+        description: "Order fulfillment status"
+        enum: [completed, pending, processing, shipped]
+        default: completed
+
+  - name: department_headcount
+    description: "Return department budgets and headcount above a minimum budget threshold (excludes salary/SSN/email)"
+    allowed_roles: [public_viewer, analyst, admin]
+    sql: >-
+      SELECT d.id, d.name, d.budget_usd, d.location
+      FROM departments d
+      WHERE d.budget_usd >= :min_budget
+      ORDER BY d.budget_usd DESC
+      LIMIT 25
+    parameters:
+      min_budget:
+        type: number
+        description: "Minimum annual department budget in USD"
+        min: 0
+        default: 0

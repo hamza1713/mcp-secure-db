@@ -1,6 +1,6 @@
 import pkg from "node-sql-parser";
 const { Parser } = pkg;
-import { UserRole, ValidationResult } from "../types.js";
+import { TableMetadata, UserRole, ValidationResult } from "../types.js";
 import { TABLE_METADATA } from "../database/seed.js";
 import {
   ALLOWED_FUNCTIONS,
@@ -9,12 +9,13 @@ import {
   PII_COLUMNS,
   SQL_LIMITS,
   getAllowedTablesForRole,
+  getAllowedTablesFromMap,
 } from "./policy.js";
 
 const DISALLOWED_CONTROL_CHARS_REGEX =
   /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F\u202A-\u202E\u2066-\u2069\uFEFF]/;
 
-const DISALLOWED_OPERATORS = new Set(["GLOB", "REGEXP", "MATCH"]);
+const DISALLOWED_OPERATORS = new Set(["GLOB", "REGEXP", "MATCH", "->", "->>"]);
 
 export type SQLDialect = "sqlite" | "postgresql";
 
@@ -29,7 +30,13 @@ export interface SQLValidatorOptions {
   maxJoins?: number;
   maxFunctionArgs?: number;
   maxLikePatternLength?: number;
+  maxOffset?: number;
   extraAllowedViews?: string[];
+  allowedSchemas?: string[];
+  roleAllowedTables?: Record<UserRole, readonly string[]>;
+  tableMetadata?: Record<string, TableMetadata>;
+  piiColumns?: Set<string>;
+  piiColumnsByTable?: Record<string, Set<string>>;
 }
 
 interface ValidationState {
@@ -54,7 +61,13 @@ export class SQLValidator {
   private maxJoins: number;
   private maxFunctionArgs: number;
   private maxLikePatternLength: number;
+  private maxOffset: number;
   private extraAllowedViews: string[];
+  private allowedSchemas: Set<string>;
+  private roleAllowedTables?: Record<UserRole, readonly string[]>;
+  private tableMetadata?: Record<string, TableMetadata>;
+  private piiColumns: Set<string>;
+  private piiColumnsByTable?: Record<string, Set<string>>;
 
   constructor(options: SQLValidatorOptions = {}) {
     this.parser = new Parser();
@@ -71,9 +84,19 @@ export class SQLValidator {
       options.maxFunctionArgs ?? SQL_LIMITS.maxFunctionArgs;
     this.maxLikePatternLength =
       options.maxLikePatternLength ?? SQL_LIMITS.maxLikePatternLength;
+    this.maxOffset = options.maxOffset ?? SQL_LIMITS.maxOffset;
     this.extraAllowedViews = (options.extraAllowedViews ?? []).map((v) =>
       v.toLowerCase()
     );
+    const defaultSchemas =
+      this.dialect === "postgresql" ? ["public"] : ["main"];
+    this.allowedSchemas = new Set(
+      (options.allowedSchemas ?? defaultSchemas).map((s) => s.toLowerCase())
+    );
+    this.roleAllowedTables = options.roleAllowedTables;
+    this.tableMetadata = options.tableMetadata;
+    this.piiColumns = options.piiColumns ?? PII_COLUMNS;
+    this.piiColumnsByTable = options.piiColumnsByTable;
   }
 
   /**
@@ -207,7 +230,7 @@ export class SQLValidator {
   /**
    * Strips quoted literals/identifiers so top-level keyword checks ignore string contents.
    */
-  private stripQuotedSegments(sql: string): string {
+  public stripQuotedSegments(sql: string): string {
     let out = "";
     let inSingle = false;
     let inDouble = false;
@@ -397,7 +420,13 @@ export class SQLValidator {
 
     const state: ValidationState = {
       role,
-      allowedTables: getAllowedTablesForRole(role, this.extraAllowedViews),
+      allowedTables: this.roleAllowedTables
+        ? getAllowedTablesFromMap(
+            role,
+            this.roleAllowedTables,
+            this.extraAllowedViews
+          )
+        : getAllowedTablesForRole(role, this.extraAllowedViews),
       tablesAccessed: new Set<string>(),
       columnsAccessed: new Set<string>(),
       functionsUsed: new Set<string>(),
@@ -434,35 +463,17 @@ export class SQLValidator {
       terminalSelect = terminalSelect._next;
     }
 
-    let limitApplied = this.defaultLimit;
-    if (
-      terminalSelect.limit &&
-      Array.isArray(terminalSelect.limit.value) &&
-      terminalSelect.limit.value.length > 0
-    ) {
-      const limitNode = terminalSelect.limit.value[0];
-      if (limitNode.type !== "number" || !Number.isInteger(Number(limitNode.value)) || Number(limitNode.value) < 0) {
-        return {
-          valid: false,
-          tablesAccessed: [...state.tablesAccessed],
-          columnsAccessed: [...state.columnsAccessed],
-          functionsUsed: [...state.functionsUsed],
-          violationReason: "LIMIT value must be a non-negative integer literal.",
-        };
-      }
-      const parsedLimit = Number(limitNode.value);
-      if (parsedLimit > this.maxRows) {
-        terminalSelect.limit.value[0].value = this.maxRows;
-        limitApplied = this.maxRows;
-      } else {
-        limitApplied = parsedLimit;
-      }
-    } else {
-      terminalSelect.limit = {
-        seperator: "",
-        value: [{ type: "number", value: this.defaultLimit }],
+    let limitApplied: number;
+    try {
+      limitApplied = this.enforceLimitClause(terminalSelect, true);
+    } catch (err: any) {
+      return {
+        valid: false,
+        tablesAccessed: [...state.tablesAccessed],
+        columnsAccessed: [...state.columnsAccessed],
+        functionsUsed: [...state.functionsUsed],
+        violationReason: err.message,
       };
-      limitApplied = this.defaultLimit;
     }
 
     let sanitizedQuery: string;
@@ -487,6 +498,100 @@ export class SQLValidator {
       functionsUsed: [...state.functionsUsed],
       limitInjected: limitApplied,
     };
+  }
+
+  private validateNonNegativeIntLiteral(node: any, label: string): number {
+    if (
+      !node ||
+      node.type !== "number" ||
+      !Number.isInteger(Number(node.value)) ||
+      Number(node.value) < 0
+    ) {
+      throw new Error(`${label} value must be a non-negative integer literal.`);
+    }
+    return Number(node.value);
+  }
+
+  private enforceLimitClause(selectNode: any, injectDefault: boolean): number {
+    const limitObj = selectNode.limit;
+    const values =
+      limitObj && Array.isArray(limitObj.value) ? limitObj.value : [];
+
+    if (values.length === 0) {
+      if (!injectDefault) {
+        return this.defaultLimit;
+      }
+      selectNode.limit = {
+        seperator: "",
+        value: [{ type: "number", value: this.defaultLimit }],
+      };
+      return this.defaultLimit;
+    }
+
+    if (values.length === 1) {
+      const parsedLimit = this.validateNonNegativeIntLiteral(
+        values[0],
+        "LIMIT"
+      );
+      if (parsedLimit > this.maxRows) {
+        values[0].value = this.maxRows;
+        return this.maxRows;
+      }
+      return parsedLimit;
+    }
+
+    if (values.length === 2) {
+      const sep = String(limitObj.seperator || "").trim().toLowerCase();
+      if (sep === ",") {
+        // SQLite/MySQL syntax: LIMIT offset, count
+        const parsedOffset = this.validateNonNegativeIntLiteral(
+          values[0],
+          "OFFSET"
+        );
+        const parsedCount = this.validateNonNegativeIntLiteral(
+          values[1],
+          "LIMIT"
+        );
+        if (parsedOffset > this.maxOffset) {
+          throw new Error(
+            `OFFSET value ${parsedOffset} exceeds maximum allowed offset of ${this.maxOffset}.`
+          );
+        }
+        if (parsedCount > this.maxRows) {
+          values[1].value = this.maxRows;
+          return this.maxRows;
+        }
+        return parsedCount;
+      }
+
+      if (sep === "offset") {
+        // Standard SQL syntax: LIMIT count OFFSET offset
+        const parsedCount = this.validateNonNegativeIntLiteral(
+          values[0],
+          "LIMIT"
+        );
+        const parsedOffset = this.validateNonNegativeIntLiteral(
+          values[1],
+          "OFFSET"
+        );
+        if (parsedOffset > this.maxOffset) {
+          throw new Error(
+            `OFFSET value ${parsedOffset} exceeds maximum allowed offset of ${this.maxOffset}.`
+          );
+        }
+        if (parsedCount > this.maxRows) {
+          values[0].value = this.maxRows;
+          return this.maxRows;
+        }
+        return parsedCount;
+      }
+
+      throw new Error(
+        `Unsupported LIMIT/OFFSET clause separator '${limitObj.seperator}'.`
+      );
+    }
+
+    throw new Error("Invalid LIMIT clause structure.");
   }
 
   private checkAstDepth(node: unknown, depth: number): void {
@@ -533,6 +638,7 @@ export class SQLValidator {
       throw new Error("Locking SELECT clauses are strictly forbidden.");
     }
 
+    const catalogMeta = this.tableMetadata ?? TABLE_METADATA;
     const activeCtes = new Set<string>(outerCtes);
 
     // 1. Validate WITH CTE definitions
@@ -554,7 +660,7 @@ export class SQLValidator {
 
         // Prevent CTE names from shadowing catalog or system tables
         if (
-          TABLE_METADATA[cteName] ||
+          catalogMeta[cteName] ||
           cteName.startsWith("sqlite_") ||
           this.extraAllowedViews.includes(cteName)
         ) {
@@ -578,6 +684,7 @@ export class SQLValidator {
 
     // 2. Validate FROM relations and joins
     const localBaseTables: string[] = [];
+    const seenRelations = new Set<string>();
     if (Array.isArray(selectNode.from)) {
       if (selectNode.from.length - 1 > this.maxJoins) {
         throw new Error(
@@ -588,10 +695,18 @@ export class SQLValidator {
       for (let i = 0; i < selectNode.from.length; i++) {
         const item = selectNode.from[i];
 
-        if (item.db && String(item.db).toLowerCase() !== "main") {
-          throw new Error(
-            `External or attached database qualifier '${item.db}' is forbidden.`
-          );
+        if (item.db) {
+          const schemaName = String(item.db).toLowerCase();
+          if (
+            schemaName.startsWith("sqlite_") ||
+            schemaName.startsWith("pg_") ||
+            schemaName === "information_schema" ||
+            !this.allowedSchemas.has(schemaName)
+          ) {
+            throw new Error(
+              `External or attached database qualifier '${item.db}' is forbidden.`
+            );
+          }
         }
 
         if (item.expr?.ast) {
@@ -620,7 +735,7 @@ export class SQLValidator {
             }
 
             if (
-              !TABLE_METADATA[tableName] &&
+              !catalogMeta[tableName] &&
               !this.extraAllowedViews.includes(tableName)
             ) {
               throw new Error(
@@ -635,6 +750,10 @@ export class SQLValidator {
             }
           }
         }
+
+        const currentRelation = String(
+          item.as || item.table || ""
+        ).toLowerCase();
 
         // Join constraints for relation index >= 1
         if (i >= 1) {
@@ -654,13 +773,20 @@ export class SQLValidator {
               "NATURAL JOIN is prohibited; specify explicit join columns in an ON clause."
             );
           }
-          if (!item.on && (!Array.isArray(item.using) || item.using.length === 0)) {
+          if (
+            !item.on &&
+            (!Array.isArray(item.using) || item.using.length === 0)
+          ) {
             throw new Error(
               "JOIN clauses must specify an explicit ON or USING condition."
             );
           }
           if (item.on) {
-            this.validateJoinCondition(item.on);
+            this.validateJoinCondition(
+              item.on,
+              seenRelations,
+              currentRelation
+            );
             this.validateExpression(item.on, state, activeCtes, nestingLevel);
           }
           if (Array.isArray(item.using)) {
@@ -672,7 +798,21 @@ export class SQLValidator {
             }
           }
         }
+
+        if (currentRelation) {
+          seenRelations.add(currentRelation);
+        }
       }
+    }
+
+    // 2.5 Validate DISTINCT / DISTINCT ON expressions (PostgreSQL)
+    if (selectNode.distinct && typeof selectNode.distinct === "object") {
+      this.validateExpression(
+        selectNode.distinct,
+        state,
+        activeCtes,
+        nestingLevel
+      );
     }
 
     // 3. Validate SELECT projection columns & wildcards
@@ -702,7 +842,7 @@ export class SQLValidator {
         ...state.tablesAccessed,
       ]);
       for (const table of candidateTables) {
-        const meta = TABLE_METADATA[table];
+        const meta = catalogMeta[table];
         if (meta && meta.columns.some((c) => c.isPII)) {
           throw new Error(
             `Wildcard SELECT * on table '${table}' containing PII columns is prohibited for role '${state.role}'. Explicitly select non-sensitive columns.`
@@ -722,7 +862,7 @@ export class SQLValidator {
       }
     }
 
-    // 4. Validate WHERE, GROUP BY, HAVING, ORDER BY, WINDOW
+    // 4. Validate WHERE, GROUP BY, HAVING, WINDOW, QUALIFY, ORDER BY, nested LIMIT
     if (selectNode.where) {
       this.validateExpression(
         selectNode.where,
@@ -752,12 +892,34 @@ export class SQLValidator {
       );
     }
 
+    if (selectNode.window) {
+      this.validateExpression(
+        selectNode.window,
+        state,
+        activeCtes,
+        nestingLevel
+      );
+    }
+
+    if (selectNode.qualify) {
+      this.validateExpression(
+        selectNode.qualify,
+        state,
+        activeCtes,
+        nestingLevel
+      );
+    }
+
     if (Array.isArray(selectNode.orderby)) {
       for (const ord of selectNode.orderby) {
         if (ord?.expr) {
           this.validateExpression(ord.expr, state, activeCtes, nestingLevel);
         }
       }
+    }
+
+    if (nestingLevel > 0 && selectNode.limit?.value?.length > 0) {
+      this.enforceLimitClause(selectNode, false);
     }
 
     // 5. Validate compound SELECT chain (UNION / UNION ALL / INTERSECT / EXCEPT)
@@ -777,7 +939,11 @@ export class SQLValidator {
     }
   }
 
-  private validateJoinCondition(onExpr: any): void {
+  private validateJoinCondition(
+    onExpr: any,
+    seenRelations: Set<string>,
+    currentRelation: string
+  ): void {
     if (!this.containsColumnRef(onExpr)) {
       throw new Error(
         "Degenerate tautological or constant join condition (e.g., ON 1=1 or ON true) is strictly forbidden."
@@ -789,6 +955,167 @@ export class SQLValidator {
         "Degenerate tautological join condition (e.g., ON 1=1) is strictly forbidden."
       );
     }
+
+    if (
+      !this.hasCrossRelationJoinPredicate(
+        onExpr,
+        seenRelations,
+        currentRelation
+      )
+    ) {
+      throw new Error(
+        "Degenerate tautological or non-correlating join condition is strictly forbidden; ON clause must compare columns across the joined relations."
+      );
+    }
+  }
+
+  private stripParenMetadata(node: any): any {
+    if (!node || typeof node !== "object") return node;
+    if (Array.isArray(node)) {
+      return node.map((item) => this.stripParenMetadata(item));
+    }
+    const cleaned: Record<string, unknown> = {};
+    for (const [key, val] of Object.entries(node)) {
+      if (key === "parentheses") continue;
+      cleaned[key] = this.stripParenMetadata(val);
+    }
+    return cleaned;
+  }
+
+  private collectColumnRefs(
+    node: any,
+    out: Array<{ table: string | null; column: string }> = []
+  ): Array<{ table: string | null; column: string }> {
+    if (!node || typeof node !== "object") return out;
+    if (Array.isArray(node)) {
+      for (const item of node) {
+        this.collectColumnRefs(item, out);
+      }
+      return out;
+    }
+    // Do not treat column refs hidden inside a scalar subquery as outer join columns
+    if (node.ast || node.type === "select") {
+      return out;
+    }
+    if (node.type === "column_ref") {
+      const col = this.extractColumnName(node.column).toLowerCase();
+      const tbl =
+        typeof node.table === "string" && node.table.length > 0
+          ? node.table.toLowerCase()
+          : null;
+      if (col) {
+        out.push({ table: tbl, column: col });
+      }
+      return out;
+    }
+    for (const val of Object.values(node)) {
+      if (val && typeof val === "object") {
+        this.collectColumnRefs(val, out);
+      }
+    }
+    return out;
+  }
+
+  private hasCrossRelationJoinPredicate(
+    node: any,
+    seenRelations: Set<string>,
+    currentRelation: string
+  ): boolean {
+    if (!node || typeof node !== "object") return false;
+    if (node.type === "expr" && node.expr) {
+      return this.hasCrossRelationJoinPredicate(
+        node.expr,
+        seenRelations,
+        currentRelation
+      );
+    }
+    if (node.type !== "binary_expr") return false;
+
+    const op = String(node.operator || "").toUpperCase();
+    if (op === "AND") {
+      return (
+        this.hasCrossRelationJoinPredicate(
+          node.left,
+          seenRelations,
+          currentRelation
+        ) ||
+        this.hasCrossRelationJoinPredicate(
+          node.right,
+          seenRelations,
+          currentRelation
+        )
+      );
+    }
+    if (op === "OR") {
+      return (
+        this.hasCrossRelationJoinPredicate(
+          node.left,
+          seenRelations,
+          currentRelation
+        ) &&
+        this.hasCrossRelationJoinPredicate(
+          node.right,
+          seenRelations,
+          currentRelation
+        )
+      );
+    }
+
+    const ALLOWED_JOIN_COMPARATORS = new Set(["=", "==", "<", "<=", ">", ">="]);
+    if (!ALLOWED_JOIN_COMPARATORS.has(op)) {
+      return false;
+    }
+
+    const leftRefs = this.collectColumnRefs(node.left);
+    const rightRefs = this.collectColumnRefs(node.right);
+    if (leftRefs.length === 0 || rightRefs.length === 0) {
+      return false;
+    }
+
+    const normLeft = JSON.stringify(this.stripParenMetadata(node.left));
+    const normRight = JSON.stringify(this.stripParenMetadata(node.right));
+    if (normLeft === normRight) {
+      return false;
+    }
+
+    const leftTables = new Set(
+      leftRefs.map((r) => r.table).filter((t): t is string => t !== null)
+    );
+    const rightTables = new Set(
+      rightRefs.map((r) => r.table).filter((t): t is string => t !== null)
+    );
+
+    // When both sides carry table/alias qualifiers, require cross-relation linkage
+    if (leftTables.size > 0 && rightTables.size > 0) {
+      for (const lt of leftTables) {
+        for (const rt of rightTables) {
+          if (lt === rt) continue;
+          if (!currentRelation || seenRelations.size === 0) {
+            return true;
+          }
+          if (
+            (lt === currentRelation && seenRelations.has(rt)) ||
+            (rt === currentRelation && seenRelations.has(lt))
+          ) {
+            return true;
+          }
+        }
+      }
+      return false;
+    }
+
+    // Fallback for unqualified column names (e.g. ON id = customer_id):
+    // require at least two distinct column names across left and right sides
+    const leftCols = new Set(leftRefs.map((r) => r.column));
+    const rightCols = new Set(rightRefs.map((r) => r.column));
+    for (const lc of leftCols) {
+      for (const rc of rightCols) {
+        if (lc !== rc) {
+          return true;
+        }
+      }
+    }
+    return false;
   }
 
   private containsColumnRef(node: any): boolean {
@@ -805,7 +1132,11 @@ export class SQLValidator {
   private hasTautologicalBranch(node: any): boolean {
     if (!node || typeof node !== "object") return false;
 
-    if (node.type === "bool" || node.type === "number" || node.type === "single_quote_string") {
+    if (
+      node.type === "bool" ||
+      node.type === "number" ||
+      node.type === "single_quote_string"
+    ) {
       return true;
     }
 
@@ -835,8 +1166,29 @@ export class SQLValidator {
     if (!this.containsColumnRef(node)) return true;
     if (node.type === "binary_expr") {
       const op = String(node.operator || "").toUpperCase();
-      if (op === "=" || op === "==" || op === "IS" || op === ">=" || op === "<=") {
-        if (JSON.stringify(node.left) === JSON.stringify(node.right)) {
+      if (
+        op === "=" ||
+        op === "==" ||
+        op === "IS" ||
+        op === ">=" ||
+        op === "<="
+      ) {
+        if (
+          JSON.stringify(this.stripParenMetadata(node.left)) ===
+          JSON.stringify(this.stripParenMetadata(node.right))
+        ) {
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  private isRestrictedPiiColumn(normalized: string, state: ValidationState): boolean {
+    if (this.piiColumns.has(normalized)) return true;
+    if (this.piiColumnsByTable) {
+      for (const tbl of state.tablesAccessed) {
+        if (this.piiColumnsByTable[tbl]?.has(normalized)) {
           return true;
         }
       }
@@ -848,7 +1200,10 @@ export class SQLValidator {
     const normalized = colName.toLowerCase();
     if (!normalized || normalized === "*") return;
     state.columnsAccessed.add(normalized);
-    if (state.role !== "admin" && PII_COLUMNS.has(normalized)) {
+    if (
+      state.role !== "admin" &&
+      this.isRestrictedPiiColumn(normalized, state)
+    ) {
       throw new Error(
         `Access denied: column '${normalized}' contains sensitive PII and requires admin privileges.`
       );
@@ -976,6 +1331,14 @@ export class SQLValidator {
       if (funcName === "like" && argValues.length >= 2) {
         const patArg = argValues[0];
         if (
+          patArg?.type !== "single_quote_string" &&
+          patArg?.type !== "string"
+        ) {
+          throw new Error(
+            "LIKE pattern must be a static string literal to prevent dynamic pattern exhaustion."
+          );
+        }
+        if (
           typeof patArg?.value === "string" &&
           patArg.value.length > this.maxLikePatternLength
         ) {
@@ -993,6 +1356,30 @@ export class SQLValidator {
         this.validateExpression(arg, state, activeCtes, nestingLevel);
       }
 
+      // Walk aggregate ORDER BY (e.g. COUNT(name ORDER BY col)), FILTER (WHERE ...),
+      // WITHIN GROUP (ORDER BY ...), and inline OVER (...) clauses.
+      if (node.args?.orderby) {
+        this.validateExpression(
+          node.args.orderby,
+          state,
+          activeCtes,
+          nestingLevel
+        );
+      }
+
+      if (node.filter) {
+        this.validateExpression(node.filter, state, activeCtes, nestingLevel);
+      }
+
+      if (node.within_group_orderby) {
+        this.validateExpression(
+          node.within_group_orderby,
+          state,
+          activeCtes,
+          nestingLevel
+        );
+      }
+
       if (node.over) {
         this.validateExpression(node.over, state, activeCtes, nestingLevel);
       }
@@ -1004,9 +1391,23 @@ export class SQLValidator {
       if (DISALLOWED_OPERATORS.has(op)) {
         throw new Error(`Operator '${op}' is not permitted.`);
       }
-      if (op === "LIKE" || op === "NOT LIKE") {
+      if (
+        op === "LIKE" ||
+        op === "NOT LIKE" ||
+        op === "ILIKE" ||
+        op === "NOT ILIKE"
+      ) {
         state.functionsUsed.add("like");
-        const pat = node.right?.value;
+        const patNode = node.right;
+        if (
+          patNode?.type !== "single_quote_string" &&
+          patNode?.type !== "string"
+        ) {
+          throw new Error(
+            "LIKE pattern must be a static string literal to prevent dynamic pattern exhaustion."
+          );
+        }
+        const pat = patNode?.value;
         if (
           typeof pat === "string" &&
           pat.length > this.maxLikePatternLength

@@ -47,6 +47,7 @@ export const ALLOWED_FUNCTIONS = new Set<string>(ALLOWED_FUNCTIONS_LIST);
 export const ALLOWED_FUNCTIONS_POSTGRES_LIST = [
   "abs",
   "avg",
+  "btrim",
   "coalesce",
   "count",
   "current_date",
@@ -163,6 +164,22 @@ function getActiveAllowedSets(): Record<UserRole, Set<string>> {
   return cachedActiveSets;
 }
 
+export function getAllowedTablesFromMap(
+  role: UserRole,
+  roleTableMap: Record<UserRole, readonly string[]>,
+  extraAllowedViews: readonly string[] = []
+): Set<string> {
+  if (role === "unauthenticated") {
+    return new Set<string>();
+  }
+  const base = roleTableMap[role] ?? [];
+  const result = new Set<string>(base.map((t) => t.toLowerCase()));
+  for (const view of extraAllowedViews) {
+    result.add(view.toLowerCase());
+  }
+  return result;
+}
+
 export function getAllowedTablesForRole(
   role: UserRole,
   extraAllowedViews: readonly string[] = []
@@ -215,6 +232,7 @@ export const SQL_LIMITS = {
   maxJoins: 4,
   maxFunctionArgs: 8,
   maxLikePatternLength: 64,
+  maxOffset: 10000,
   maxAuthorizerOps: 250,
   maxRows: 1000,
   defaultLimit: 100,
