@@ -303,7 +303,21 @@ async function main(): Promise<void> {
     }) as typeof process.stdout.write;
   }
 
-  const instance = createSecureMcpServer({ policy, stdioRole, stdioTenantId });
+  // OAuth guards the network-facing HTTP endpoint. The stdio transport is a
+  // local process whose trust comes from the launching user (--stdio-role or
+  // MCP_SECURE_DB_TOKEN), so the OAuth gate is not applied there.
+  const oauthEnvSet = Boolean(process.env.MCP_SECURE_DB_OAUTH_ISSUER?.trim());
+  if (transport === "stdio" && oauthEnvSet) {
+    process.stderr.write(
+      "[mcp-secure-db] MCP_SECURE_DB_OAUTH_ISSUER is ignored for the stdio transport (local trust).\n"
+    );
+  }
+  const instance = createSecureMcpServer({
+    policy,
+    stdioRole,
+    stdioTenantId,
+    ...(transport === "stdio" ? { oauth: null } : {}),
+  });
 
   // Eagerly initialize engine introspection and validate all declared templates at boot
   await instance.validateTemplates();
@@ -410,7 +424,7 @@ async function main(): Promise<void> {
   const port = Number(values.port ?? process.env.PORT ?? 8000);
   const host = values.host ?? process.env.HOST ?? "127.0.0.1";
   process.stderr.write(
-    `[mcp-secure-db] starting HTTP server on http://${host}:${port}/mcp (engine=${instance.policy.engine.type}, policy=${instance.policy.mode}, templates=${instance.policy.templates.length})\n`
+    `[mcp-secure-db] starting HTTP server on http://${host}:${port}/mcp (engine=${instance.policy.engine.type}, policy=${instance.policy.mode}, templates=${instance.policy.templates.length}, auth=${oauthEnvSet ? "oauth-jwt" : "api-keys"})\n`
   );
   await instance.server.listen(port, { host });
 }

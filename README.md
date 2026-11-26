@@ -365,10 +365,29 @@ sequenceDiagram
 
 Authentication enforces **default-deny** [E:CLAIM-017] [E:CLAIM-053]:
 
-1. Verified OAuth access tokens (`ctx.auth` in `mcp-use` `2.12.2` [E:CLAIM-013]) are resolved first. Recognized scopes: `db:read:metadata`, `db:execute:analytics`, `db:audit:read`, `db:pii:access`.
+1. **OAuth / OIDC JWT access tokens** (enabled by `MCP_SECURE_DB_OAUTH_ISSUER`, see [6.1](#61-oauth--oidc-single-sign-on)) are verified by the `mcp-use` bearer gate (signature via JWKS, issuer, audience/resource, expiry) and mapped to a role through an operator-defined role-claim mapping [E:CLAIM-013] [E:CLAIM-064]. When OAuth is enabled, the HTTP MCP endpoint accepts **only** valid JWTs; API keys and demo tokens are refused there.
 2. Environment-configured API keys (`MCP_SECURE_DB_API_KEYS`) matched via constant-time SHA-256 comparison (`crypto.timingSafeEqual`) via `Authorization: Bearer <token>` or `x-api-key` headers [E:CLAIM-053].
 3. Static local demo tokens (`token-viewer-demo`, `token-analyst-demo`, `token-admin-demo`) are **disabled by default**, require explicit `MCP_SECURE_DB_ALLOW_DEMO_TOKENS=true`, and are always disabled when `NODE_ENV=production` [E:CLAIM-053]. Tool-argument `token` overrides are also ignored in `NODE_ENV=production`.
 4. Anything else resolves to `unauthenticated` (hiding tools, resources, and prompts on wire list/read/get calls [E:CLAIM-053]).
+
+### 6.1 OAuth / OIDC single sign-on
+
+Works with any identity provider that issues signed JWT access tokens and publishes a JWKS (Okta, Microsoft Entra ID, Auth0, Keycloak, Cognito, Google) [E:CLAIM-064]. Copy the endpoint values from your provider's `/.well-known/openid-configuration` document:
+
+| Variable | Required | Purpose |
+| :--- | :-: | :--- |
+| `MCP_SECURE_DB_OAUTH_ISSUER` | yes | Expected `iss` claim; setting it enables OAuth |
+| `MCP_SECURE_DB_OAUTH_JWKS_URL` | yes | Signing keys (`jwks_uri`) |
+| `MCP_SECURE_DB_OAUTH_AUTHORIZATION_ENDPOINT` / `MCP_SECURE_DB_OAUTH_TOKEN_ENDPOINT` | yes | Advertised to MCP clients for the login flow |
+| `MCP_SECURE_DB_OAUTH_RESOURCE_URL` | recommended | Public MCP URL, e.g. `https://db-gateway.example.com/mcp` |
+| `MCP_SECURE_DB_OAUTH_AUDIENCE` | provider-dependent | Expected `aud` when it differs from the resource URL (comma-separated) |
+| `MCP_SECURE_DB_OAUTH_ROLE_CLAIM` | no (`roles`) | Claim with IdP roles/groups; exact key (`https://acme.io/roles`) or dotted path (`realm_access.roles`) |
+| `MCP_SECURE_DB_OAUTH_ROLE_MAP` | no | JSON map of IdP values to roles, e.g. `{"db-analysts":"analyst","db-admins":"admin"}` |
+| `MCP_SECURE_DB_OAUTH_TENANT_CLAIM` | no (`tenant_id`) | Claim carrying the caller's tenant |
+| `MCP_SECURE_DB_OAUTH_ALGORITHMS` | no | Allowed JWS algorithms; asymmetric only (`HS*` and `none` are rejected) |
+| `MCP_SECURE_DB_OAUTH_TRUST_SCOPES` | no (`false`) | Also grant roles from `db:*` scopes in the token. Off by default because some IdPs let clients request any scope |
+
+Only the highest mapped role is granted; unmapped values are ignored, so a valid token with no mapped role gets `whoami` only. Incomplete or insecure OAuth settings stop the server at startup rather than running without authentication. The `stdio` transport ignores OAuth because its trust comes from the local launching process.
 
 | Credentials | Resolved Role | Allowed Tools |
 | :--- | :--- | :--- |
@@ -718,7 +737,7 @@ docker compose down -v
 
 ## 12. Verification, Testing, and CI
 
-The test suite includes 300 automated tests across 23 test files [E:CLAIM-048]:
+The test suite includes 313 automated tests across 24 test files [E:CLAIM-048]:
 
 - **Phase 3 Tamper-Evident Audit & Observability (`tests/phase3-audit-and-observability.test.ts`)**: Verifies SHA-256 and keyed HMAC-SHA256 hash-chaining, restart resumption, `ROTATION_ANCHOR` segment linking, tamper detection (1-byte edits, deletions, reordering, unsigned lines), CLI `--verify-audit` exit codes, authenticated `GET /metrics` (`401`/`403`/`200`), and `requestId` structured NDJSON correlation [E:CLAIM-060] [E:CLAIM-061].
 - **Phase 3 Multi-Tenant Isolation & RLS (`tests/phase3-multi-tenant-rls.test.ts`)**: Verifies `tenantId` extraction from OAuth claims, API keys, and `--stdio-tenant`, unspoofable `:ctx.tenant_id` template scoping, `require_tenant_id` fail-closed enforcement, and parameterized PostgreSQL `set_config('app.tenant_id', $1, true)` injection before `SET LOCAL ROLE` [E:CLAIM-062].
@@ -787,7 +806,8 @@ End-to-end latency also includes worker IPC, SQLite execution, result scanning, 
 - **Does not stop downstream prompt injection:** The validator, SQLite authorizer, and worker sandbox limit what SQL operations an injected instruction can execute; they do **not** stop a prompt-injected agent from reading data its authenticated role is permitted to access. Response data is tagged with `untrustedData: true` to assist calling models [E:CLAIM-046].
 - **Inference and aggregation on permitted columns:** Statistical or multi-query inference over non-PII columns that a role is allowed to query remains possible.
 - **`node:sqlite` experimental status:** Built-in `node:sqlite` emits an `ExperimentalWarning` in Node.js and may evolve across Node releases.
-- **Single serialized SQLite worker:** SQLite queries run one at a time through one worker. For concurrent multi-tenant workloads use the PostgreSQL engine [E:CLAIM-050].
+- **SQLite worker pool scope:** SQLite runs in a small read-only worker pool (`engine.worker_pool_size` 1–8) [E:CLAIM-063]. For concurrent multi-tenant workloads use the PostgreSQL engine [E:CLAIM-050].
+- **Single-instance rate limits:** Rate limits and row budgets are held in process memory, so they reset on restart and are not shared across replicas [E:CLAIM-044].
 - **Demo dataset scope:** Default execution runs against 4 seeded in-memory SQLite tables [E:CLAIM-009] and is not evidence of production behavior against external cloud data warehouses.
 - **Static demo tokens:** The `token-*-demo` credentials are for local testing only. Use verified OAuth in any shared deployment [E:CLAIM-013].
 - **In-memory audit buffer durability:** The 100-entry ring buffer is an in-memory debugging cache and is not durable across process restarts [E:CLAIM-027]. A persistent append-only log is written to `data/audit.jsonl` [E:CLAIM-045].

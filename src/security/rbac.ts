@@ -387,11 +387,13 @@ export class RBACManager {
       (typeof payloadObj.sub === "string" && payloadObj.sub) ||
       oauth.clientId ||
       "oauth_authenticated_principal";
+    // `user.tenant_id` is set by the configured OAuth provider from the
+    // operator-chosen tenant claim, so it takes precedence over well-known claims.
     const tenantId = validateTenantId(
-      payloadObj.tenant_id ??
+      userObj.tenant_id ??
+        payloadObj.tenant_id ??
         payloadObj.org_id ??
         payloadObj.tid ??
-        userObj.tenant_id ??
         userObj.org_id ??
         extraObj.tenant_id
     );

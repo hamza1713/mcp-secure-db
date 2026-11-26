@@ -31,6 +31,11 @@ import {
   StructuredLogger,
 } from "./observability/logger.js";
 import { SecurityContext, UserRole } from "./types.js";
+import type { OAuthProvider } from "mcp-use/oauth";
+import {
+  oauthProviderFromEnv,
+  type SecureDbOAuthUser,
+} from "./security/oauth-provider.js";
 
 export interface CreateSecureMcpServerOptions {
   policy?: ResolvedPolicy;
@@ -45,6 +50,13 @@ export interface CreateSecureMcpServerOptions {
    * Trusted local stdio tenant bound ONLY by `src/cli.ts --transport stdio --stdio-tenant <id>`.
    */
   stdioTenantId?: string;
+  /**
+   * OAuth resource-server provider for the HTTP MCP endpoint.
+   * - `undefined` (default): read from `MCP_SECURE_DB_OAUTH_*` environment variables.
+   * - `null`: OAuth disabled (used by the stdio transport, whose trust comes from the local process).
+   * When a provider is active, every MCP request must carry a valid JWT access token.
+   */
+  oauth?: OAuthProvider<SecureDbOAuthUser> | null;
   rateLimiter?: RateLimiter;
   validationLimiter?: RateLimiter;
   metrics?: MetricsRegistry;
@@ -143,12 +155,56 @@ export function createSecureMcpServer(
       : defaultRateLimiter);
   const dryRunRateLimiter = options.validationLimiter ?? validationRateLimiter;
 
+  const oauthProvider =
+    options.oauth === undefined ? oauthProviderFromEnv() : options.oauth ?? undefined;
+
+  // ServerConfig's OAuth branch is generic over the user type; the instance is
+  // exposed as a plain MCPServer because callbacks read ctx.auth defensively.
   const server = new MCPServer({
     name: "mcp-secure-db",
     version: "1.0.0",
     description:
       "Zero-trust SQL MCP gateway with declarative policy, live introspection, layered AST validation, parameterized templates, and isolated database execution",
-  });
+    ...(oauthProvider ? { oauth: oauthProvider } : {}),
+  } as ConstructorParameters<typeof MCPServer>[0]) as MCPServer;
+  const oauthEnabled = Boolean(oauthProvider);
+
+  /**
+   * Tool/resource/prompt callbacks receive the provider-mapped identity
+   * (`user`, `permissions`), while MCP middleware receives the SDK's raw
+   * verified `AuthInfo` (`extra.payload`). Both are normalized here through the
+   * provider's own `mapAuthInfo`, so role resolution is identical everywhere.
+   *
+   * Roles come only from the verified role mapping (`permissions`). Raw token
+   * scopes are never trusted directly; with MCP_SECURE_DB_OAUTH_TRUST_SCOPES=true
+   * the provider copies the recognised db:* scopes into `permissions` itself.
+   */
+  function normalizeOAuthContext(auth: any) {
+    if (Array.isArray(auth?.permissions) && auth?.user) {
+      return {
+        clientId: auth.clientId,
+        scopes: [] as string[],
+        permissions: auth.permissions as string[],
+        user: auth.user,
+        payload: auth.payload,
+      };
+    }
+    if (oauthProvider) {
+      try {
+        const mapped = oauthProvider.mapAuthInfo(auth);
+        return {
+          clientId: auth?.clientId,
+          scopes: [] as string[],
+          permissions: mapped.permissions,
+          user: mapped.user,
+          payload: mapped.payload,
+        };
+      } catch {
+        // Unmappable token (e.g. no subject): fail closed with no permissions.
+      }
+    }
+    return { clientId: auth?.clientId, scopes: [] as string[], permissions: [] as string[], user: {}, payload: {} };
+  }
 
   // Pre-compile template SQL placeholders & Zod schemas synchronously so undeclared
   // placeholders fail immediately; full AST validation runs once introspection is ready.
@@ -234,15 +290,13 @@ export function createSecureMcpServer(
       if (authHeader) token = authHeader;
     }
 
-    const oauth = ctx?.auth
-      ? {
-          clientId: ctx.auth.clientId,
-          scopes: ctx.auth.scopes,
-          permissions: ctx.auth.permissions,
-          user: ctx.auth.user,
-          payload: ctx.auth.payload ?? ctx.auth.extra,
-        }
-      : null;
+    const oauth = ctx?.auth ? normalizeOAuthContext(ctx.auth) : null;
+
+    if (oauthEnabled && !oauth) {
+      // Defense in depth: with OAuth active the SDK gate rejects requests
+      // without a valid JWT, so any direct handler call lacking ctx.auth fails closed.
+      return rbac.resolveContext(null);
+    }
 
     if (!oauth && (!token || !token.trim()) && options.stdioRole) {
       return rbac.resolveStdioRole(options.stdioRole, options.stdioTenantId);

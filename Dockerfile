@@ -35,4 +35,4 @@ COPY examples/policies ./examples/policies
 USER appuser
 EXPOSE 8000
 
-CMD ["node", ".mcp-use/build/index.js"]
+CMD ["node", "dist/cli.js", "--transport", "http"]
