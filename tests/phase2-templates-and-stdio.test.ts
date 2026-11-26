@@ -1,7 +1,9 @@
 import { describe, it, expect } from "vitest";
 import { spawn, spawnSync } from "node:child_process";
 import crypto from "node:crypto";
+import fs from "node:fs";
 import path from "node:path";
+import { seedCompanyDatabase } from "../scripts/seed-company-db.js";
 import {
   loadPolicyFromFile,
   resolvePolicyObject,
@@ -327,6 +329,11 @@ describe("Phase 2: Parameterized Safe Templates, Health Probes & Stdio CLI", () 
       );
       expect(r1.status, r1.stderr).toBe(0);
       expect(JSON.parse(r1.stdout).valid).toBe(true);
+
+      // company-sqlite.policy.yaml points at real_world_company.db, which is
+      // gitignored (*.db) and therefore absent on fresh CI checkouts.
+      const companyDb = path.join(ROOT_DIR, "real_world_company.db");
+      if (!fs.existsSync(companyDb)) seedCompanyDatabase(companyDb);
 
       const r2 = spawnSync(
         process.execPath,
