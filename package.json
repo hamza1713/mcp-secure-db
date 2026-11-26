@@ -25,7 +25,7 @@
     "test:integration": "vitest run --config vitest.integration.config.ts",
     "pg:up": "docker compose -f docker/docker-compose.postgres.yml up -d --wait",
     "pg:down": "docker compose -f docker/docker-compose.postgres.yml down -v",
-    "test": "vitest run && pnpm run claims:lint && pnpm run deps:verify",
+    "test": "pnpm run build:cli && vitest run && pnpm run claims:lint && pnpm run deps:verify",
     "typecheck": "tsc --noEmit",
     "seed:company": "tsx scripts/seed-company-db.ts",
     "test:gemini": "tsx scripts/gemini-live-tester.ts"
