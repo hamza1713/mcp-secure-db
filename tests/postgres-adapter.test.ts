@@ -29,7 +29,7 @@ describe("PostgreSQL Secure Adapter Unit Suite", () => {
     expect(sessionSql).toContain(
       `SET LOCAL idle_in_transaction_session_timeout = '${DEFAULT_POSTGRES_OPTIONS.idleTimeoutMs}ms'`
     );
-    expect(sessionSql).toContain('SET LOCAL search_path = "public"');
+    expect(sessionSql).toContain('SET LOCAL search_path = "public", pg_temp');
   });
 
   it("rejects access to PostgreSQL system catalogs and sensitive tables", () => {

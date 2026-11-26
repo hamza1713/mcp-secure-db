@@ -8,7 +8,7 @@ export type UserRole =
   | "analyst"
   | "admin";
 
-export type AuthSource = "oauth" | "token" | "insecure_demo" | "none";
+export type AuthSource = "oauth" | "token" | "stdio_local" | "insecure_demo" | "none";
 
 export interface SecurityContext {
   principal: string;
@@ -17,6 +17,7 @@ export interface SecurityContext {
   authSource: AuthSource;
   scopes: string[];
   allowedTools: string[];
+  tenantId?: string;
   denialReason?: string;
 }
 
@@ -38,6 +39,7 @@ export interface TableMetadata {
 export interface SqliteSecurityControlsReport {
   engine: string;
   workerThread: boolean;
+  readOnlyOpen?: boolean;
   defensiveMode: boolean;
   loadExtensionDisabled: boolean;
   queryOnlyPragma: number;
@@ -75,6 +77,14 @@ export interface QueryExecutionResult {
   };
 }
 
+export interface SqliteWorkerPoolStats {
+  poolSize: number;
+  activeWorkers: number;
+  busyWorkers: number;
+  queuedQueries: number;
+  totalTerminations: number;
+}
+
 export type AuditStatus =
   | "SUCCESS"
   | "BLOCKED_AUTH"
@@ -84,13 +94,16 @@ export type AuditStatus =
   | "BLOCKED_RESULT_POLICY"
   | "BLOCKED_RATE_LIMIT"
   | "TIMEOUT"
-  | "ERROR";
+  | "ERROR"
+  | "ROTATION_ANCHOR";
 
 export interface AuditLogEntry {
   id: string;
   timestamp: string;
+  requestId?: string;
   principal: string;
   role: UserRole;
+  tenantId?: string;
   tool?: string;
   query: string;
   status: AuditStatus;
@@ -99,6 +112,10 @@ export interface AuditLogEntry {
   reason?: string;
   ruleFired?: string;
   persisted?: boolean;
+  seq?: number;
+  prevHash?: string;
+  entryHash?: string;
+  hashAlg?: "sha256" | "hmac-sha256";
 }
 
 export interface ValidationResult {

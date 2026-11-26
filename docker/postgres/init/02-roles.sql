@@ -1,8 +1,10 @@
 -- PostgreSQL Role Provisioning and Column-Level Least Privilege for mcp-secure-db
 -- Enforces true database-level least privilege matching MCP security context roles
 
--- Revoke default public schema permissions
+-- Revoke default public schema and temporary object permissions
 REVOKE ALL ON SCHEMA public FROM PUBLIC;
+REVOKE CREATE ON SCHEMA public FROM PUBLIC;
+REVOKE TEMP ON DATABASE mcp_analytics FROM PUBLIC;
 REVOKE ALL ON ALL TABLES IN SCHEMA public FROM PUBLIC;
 
 -- Create application roles if they do not exist

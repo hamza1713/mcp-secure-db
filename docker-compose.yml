@@ -1,0 +1,66 @@
+# One-Command Full-Stack Demo: mcp-secure-db Gateway + PostgreSQL 17 (with Least-Privilege Roles & Native RLS)
+#
+# Usage:
+#   docker compose up --build -d
+#   curl -s http://127.0.0.1:8000/healthz
+#   curl -s http://127.0.0.1:8000/readyz
+#   docker compose down -v
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    container_name: mcp-secure-db-pg17
+    environment:
+      POSTGRES_DB: mcp_analytics
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres_local_dev_pw
+    ports:
+      - "127.0.0.1:55432:5432"
+    volumes:
+      - ./docker/postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d mcp_analytics"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+
+  mcp-secure-db:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: mcp-secure-db-gateway
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command:
+      - "node"
+      - "dist/cli.js"
+      - "--config"
+      - "/app/examples/policies/postgres-templates-only.policy.yaml"
+      - "--transport"
+      - "http"
+      - "--host"
+      - "0.0.0.0"
+      - "--port"
+      - "8000"
+    ports:
+      - "127.0.0.1:8000:8000"
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgres://mcp_gateway:mcp_gateway_test_pw@postgres:5432/mcp_analytics
+      MCP_SECURE_DB_AUDIT_PATH: /app/data/audit.jsonl
+      MCP_SECURE_DB_AUDIT_HMAC_KEY: ${MCP_SECURE_DB_AUDIT_HMAC_KEY:-local-compose-audit-hmac-key-change-me}
+      MCP_SECURE_DB_METRICS_TOKEN: ${MCP_SECURE_DB_METRICS_TOKEN:-local-compose-metrics-token-change-me}
+      MCP_SECURE_DB_LOG_FORMAT: json
+      MCP_SECURE_DB_API_KEYS: ${MCP_SECURE_DB_API_KEYS:-[{"token":"local-compose-analyst-key","principal":"analyst@compose.local","role":"analyst","tenantId":"tenant_acme"},{"token":"local-compose-admin-key","principal":"admin@compose.local","role":"admin"}]}
+    volumes:
+      - audit_data:/app/data
+      - ./examples/policies:/app/examples/policies:ro
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"fetch('http://127.0.0.1:8000/readyz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\""]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  audit_data:

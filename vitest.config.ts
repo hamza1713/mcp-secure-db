@@ -8,6 +8,8 @@ export default defineConfig({
     exclude: ["**/node_modules/**", "**/dist/**", "tests/integration/**"],
     env: {
       MCP_SECURE_DB_SQLITE_PATH: "",
+      MCP_SECURE_DB_ALLOW_DEMO_TOKENS: "true",
+      MCP_SECURE_DB_AUDIT_PATH: "tests/scratch/vitest-audit.jsonl",
     },
   },
 });

@@ -17,6 +17,11 @@ import { rbacManager } from "../src/security/rbac.js";
 import { UserRole } from "../src/types.js";
 import { seedCompanyDatabase } from "./seed-company-db.js";
 
+// Ensure local demo tokens are explicitly enabled for the interactive CLI tester
+if (!process.env.MCP_SECURE_DB_ALLOW_DEMO_TOKENS && process.env.NODE_ENV !== "production") {
+  process.env.MCP_SECURE_DB_ALLOW_DEMO_TOKENS = "true";
+}
+
 // Ensure real_world_company.db is provisioned and active when no override path is set
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const companyDbPath = path.join(rootDir, "real_world_company.db");
@@ -411,7 +416,7 @@ You have access to tools that can discover tables, describe schemas, and execute
 Always verify table schemas or list tables before executing queries.
 When answering business questions, call execute_analytical_sql with safe, read-only SELECT statements with explicit column names (avoid SELECT *).
 If an operation is blocked by security guardrails (RBAC, AST validator, PII protection, or timeout), clearly explain the defense reason to the user.
-Current user role: ${currentAuth.role}. Active token: ${currentAuth.token}.`;
+Current user role: ${currentAuth.role}. Authentication headers are injected automatically by the CLI harness; never invent or echo credentials.`;
 
   let activeModel = process.env.GEMINI_MODEL || "gemini-3.8-flash";
   const fallbackModel = "gemini-3.5-flash-lite";

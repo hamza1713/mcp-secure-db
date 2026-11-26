@@ -78,9 +78,9 @@ export const RED_TEAM_ATTACKS: RedTeamAttack[] = [
   },
   {
     id: "RT-012",
-    name: "Disallowed JSON operator (->) probing unallowlisted functions",
-    sql: "SELECT name FROM customers WHERE json_extract('{\"a\":1}', '$.a') = 1",
-    targetDefenseLayer: "Strict SQLite function allowlist",
+    name: "Disallowed JSON operator (->) attempting expression extraction",
+    sql: "SELECT name -> 'a' FROM customers",
+    targetDefenseLayer: "AST validator operator allowlist & SQLite authorizer",
   },
   {
     id: "RT-013",

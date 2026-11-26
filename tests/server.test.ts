@@ -215,7 +215,7 @@ describe("MCP Server End-to-End Suite", () => {
   });
 
   describe("Tool: describe_table", () => {
-    it("should return column descriptions and mark PII hidden for viewer", async () => {
+    it("should return non-PII column descriptions and omit PII columns for viewer", async () => {
       const res: any = await handleDescribeTable(
         { table_name: "customers", token: "token-viewer-demo" },
         {} as any
@@ -225,8 +225,8 @@ describe("MCP Server End-to-End Suite", () => {
       const billingCol = body.columns.find(
         (c: any) => c.name === "billing_email"
       );
-      expect(billingCol.isPII).toBe(true);
-      expect(billingCol.hidden).toBe(true);
+      expect(billingCol).toBeUndefined();
+      expect(body.redactedPiiColumnCount).toBe(2);
     });
 
     it("should reveal PII columns for admin", async () => {
@@ -240,6 +240,7 @@ describe("MCP Server End-to-End Suite", () => {
       );
       expect(billingCol.isPII).toBe(true);
       expect(billingCol.hidden).toBe(false);
+      expect(body.redactedPiiColumnCount).toBe(0);
     });
 
     it("should return error when viewer requests admin-only table", async () => {

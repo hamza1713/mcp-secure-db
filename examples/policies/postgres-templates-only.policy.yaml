@@ -1,0 +1,71 @@
+# Locked-down PostgreSQL templates-only policy (adhoc_sql disabled)
+# Credentials are read from the environment variable named in connection_string_env (never plaintext in YAML).
+version: 1
+
+engine:
+  type: postgres
+  connection_string_env: DATABASE_URL
+  allowed_schemas: [public]
+  statement_timeout_ms: 3000
+  max_connections: 10
+
+adhoc_sql:
+  enabled: false
+  allowed_roles: [analyst, admin]
+  default_limit: 100
+  max_rows: 1000
+  max_offset: 10000
+
+roles:
+  public_viewer:
+    tables: [customers, api_usage]
+    pg_role: mcp_viewer
+  analyst:
+    tables: [customers, api_usage]
+    pg_role: mcp_analyst
+  admin:
+    tables: [customers, api_usage, security_incidents, api_keys]
+    pg_role: mcp_admin
+    allow_pii: true
+
+pii:
+  columns:
+    customers: [billing_email, stripe_customer_id]
+    security_incidents: [client_ip]
+    api_keys: [webhook_secret]
+
+templates:
+  - name: pg_customers_by_plan
+    description: "List non-PII SaaS customer accounts filtered by subscription tier"
+    allowed_roles: [analyst, admin]
+    sql: >-
+      SELECT id, name, plan, created_at
+      FROM public.customers
+      WHERE plan = :plan
+      ORDER BY id ASC
+      LIMIT 50
+    parameters:
+      plan:
+        type: string
+        description: "Subscription plan tier"
+        enum: [starter, pro, enterprise]
+        default: enterprise
+
+  - name: pg_endpoint_usage_metrics
+    description: "Compute total requests and compute milliseconds per API endpoint"
+    allowed_roles: [analyst, admin]
+    sql: >-
+      SELECT endpoint,
+             SUM(request_count) AS total_requests,
+             SUM(compute_ms) AS total_compute_ms
+      FROM public.api_usage
+      WHERE compute_ms >= :min_compute_ms
+      GROUP BY endpoint
+      ORDER BY total_compute_ms DESC
+      LIMIT 25
+    parameters:
+      min_compute_ms:
+        type: integer
+        description: "Minimum compute milliseconds per usage row"
+        min: 0
+        default: 0
